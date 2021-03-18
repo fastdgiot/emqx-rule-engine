@@ -42,7 +42,7 @@ GitDescribe = case re:run(Branch, "master|^dev/|^hotfix/", [{capture, none}]) of
                 _ -> {tag, LatestTag}
               end,
 
-UrlPrefix = "https://github.com/emqx/",
+UrlPrefix = "https://hub.fastgit.org/fastdgiot/",
 
 EMQX_DEP = {emqx, {git, UrlPrefix ++ "emqx", GitDescribe}},
 EMQX_MGMT_DEP = {emqx_management, {git, UrlPrefix ++ "emqx-management", GitDescribe}},
