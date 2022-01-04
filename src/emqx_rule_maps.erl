@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -28,19 +28,10 @@
 nested_get(Key, Data) ->
     nested_get(Key, Data, undefined).
 
-nested_get({var, Key}, Data, Default) when is_map(Data) orelse is_list(Data) ->
+nested_get({var, Key}, Data, Default) ->
     general_map_get({key, Key}, Data, Data, Default);
-nested_get({path, Path}, Data, Default) when is_map(Data) orelse is_list(Data),
-                                             is_list(Path) ->
-    do_nested_get(Path, Data, Data, Default);
-nested_get(Key, JsonStr, Default) when is_binary(JsonStr) ->
-    try emqx_json:decode(JsonStr, [return_maps]) of
-        Json -> nested_get(Key, Json, Default)
-    catch
-        _:_ -> Default
-    end;
-nested_get(_Key, _InvalidData, Default) ->
-    Default.
+nested_get({path, Path}, Data, Default) when is_list(Path) ->
+    do_nested_get(Path, Data, Data, Default).
 
 do_nested_get([Key|More], Data, OrgData, Default) ->
     case general_map_get(Key, Data, OrgData, undefined) of
@@ -83,9 +74,9 @@ general_map_put(Key, Val, Map, OrgData) ->
             (_) -> do_put(Key, Val, Map, OrgData)
         end).
 
-general_find(Key, JsonStr, _OrgData, Handler) when is_binary(JsonStr) ->
-    try emqx_json:decode(JsonStr, [return_maps]) of
-        Json -> general_find(Key, Json, _OrgData, Handler)
+general_find(KeyOrIndex, Data, OrgData, Handler) when is_binary(Data) ->
+    try emqx_json:decode(Data, [return_maps]) of
+        Json -> general_find(KeyOrIndex, Json, OrgData, Handler)
     catch
         _:_ -> Handler(not_found)
     end;

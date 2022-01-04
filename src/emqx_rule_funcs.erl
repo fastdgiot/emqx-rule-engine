@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
 %%--------------------------------------------------------------------
 
 -module(emqx_rule_funcs).
+
+-include("rule_engine.hrl").
 
 %% IoT Funcs
 -export([ msgid/0
@@ -33,6 +35,7 @@
         , contains_topic/3
         , contains_topic_match/2
         , contains_topic_match/3
+        , null/0
         ]).
 
 %% Arithmetic Funcs
@@ -78,6 +81,10 @@
         , bitxor/2
         , bitsl/2
         , bitsr/2
+        , bitsize/1
+        , subbits/2
+        , subbits/3
+        , subbits/6
         ]).
 
 %% Data Type Convertion
@@ -87,6 +94,8 @@
         , int/1
         , float/1
         , map/1
+        , bin2hexstr/1
+        , hexstr2bin/1
         ]).
 
 %% Data Type Validation Funcs
@@ -165,14 +174,30 @@
         , base64_decode/1
         , json_decode/1
         , json_encode/1
+        , term_decode/1
+        , term_encode/1
         ]).
 
 %% Date functions
 -export([ now_rfc3339/0
         , now_rfc3339/1
+        , unix_ts_to_rfc3339/1
+        , unix_ts_to_rfc3339/2
+        , rfc3339_to_unix_ts/1
+        , rfc3339_to_unix_ts/2
         , now_timestamp/0
         , now_timestamp/1
         ]).
+
+%% Proc Dict Func
+ -export([ proc_dict_get/1
+         , proc_dict_put/2
+         , proc_dict_del/1
+         , kv_store_get/1
+         , kv_store_get/2
+         , kv_store_put/2
+         , kv_store_del/1
+         ]).
 
 -export(['$handle_undefined_function'/2]).
 
@@ -233,7 +258,7 @@ payload() ->
 
 payload(Path) ->
     fun(#{payload := Payload}) when erlang:is_map(Payload) ->
-            map_get(Path, Payload);
+            emqx_rule_maps:nested_get(map_path(Path), Payload);
        (_) -> undefined
     end.
 
@@ -275,6 +300,9 @@ find_topic_filter(Filter, TopicFilters, Func) ->
     catch
         throw:Result -> Result
     end.
+
+null() ->
+    undefined.
 
 %%------------------------------------------------------------------------------
 %% Arithmetic Funcs
@@ -401,6 +429,74 @@ bitsl(X, I) when is_integer(X), is_integer(I) ->
 bitsr(X, I) when is_integer(X), is_integer(I) ->
     X bsr I.
 
+bitsize(Bits) when is_bitstring(Bits) ->
+    bit_size(Bits).
+
+subbits(Bits, Len) when is_integer(Len), is_bitstring(Bits) ->
+    subbits(Bits, 1, Len).
+
+subbits(Bits, Start, Len) when is_integer(Start), is_integer(Len), is_bitstring(Bits) ->
+    get_subbits(Bits, Start, Len, <<"integer">>, <<"unsigned">>, <<"big">>).
+
+subbits(Bits, Start, Len, Type, Signedness, Endianness) when is_integer(Start), is_integer(Len), is_bitstring(Bits) ->
+    get_subbits(Bits, Start, Len, Type, Signedness, Endianness).
+
+get_subbits(Bits, Start, Len, Type, Signedness, Endianness) ->
+    Begin = Start - 1,
+    case Bits of
+        <<_:Begin, Rem/bits>> when Rem =/= <<>> ->
+            Sz = bit_size(Rem),
+            do_get_subbits(Rem, Sz, Len, Type, Signedness, Endianness);
+        _ -> undefined
+    end.
+
+-define(match_bits(Bits0, Pattern, ElesePattern),
+    case Bits0 of
+        Pattern ->
+            SubBits;
+        ElesePattern ->
+            SubBits
+    end).
+do_get_subbits(Bits, Sz, Len, <<"integer">>, <<"unsigned">>, <<"big">>) ->
+    ?match_bits(Bits, <<SubBits:Len/integer-unsigned-big-unit:1, _/bits>>,
+                      <<SubBits:Sz/integer-unsigned-big-unit:1>>);
+do_get_subbits(Bits, Sz, Len, <<"float">>, <<"unsigned">>, <<"big">>) ->
+    ?match_bits(Bits, <<SubBits:Len/float-unsigned-big-unit:1, _/bits>>,
+                      <<SubBits:Sz/float-unsigned-big-unit:1>>);
+do_get_subbits(Bits, Sz, Len, <<"bits">>, <<"unsigned">>, <<"big">>) ->
+    ?match_bits(Bits, <<SubBits:Len/bits-unsigned-big-unit:1, _/bits>>,
+                      <<SubBits:Sz/bits-unsigned-big-unit:1>>);
+
+do_get_subbits(Bits, Sz, Len, <<"integer">>, <<"signed">>, <<"big">>) ->
+    ?match_bits(Bits, <<SubBits:Len/integer-signed-big-unit:1, _/bits>>,
+                      <<SubBits:Sz/integer-signed-big-unit:1>>);
+do_get_subbits(Bits, Sz, Len, <<"float">>, <<"signed">>, <<"big">>) ->
+    ?match_bits(Bits, <<SubBits:Len/float-signed-big-unit:1, _/bits>>,
+                      <<SubBits:Sz/float-signed-big-unit:1>>);
+do_get_subbits(Bits, Sz, Len, <<"bits">>, <<"signed">>, <<"big">>) ->
+    ?match_bits(Bits, <<SubBits:Len/bits-signed-big-unit:1, _/bits>>,
+                      <<SubBits:Sz/bits-signed-big-unit:1>>);
+
+do_get_subbits(Bits, Sz, Len, <<"integer">>, <<"unsigned">>, <<"little">>) ->
+    ?match_bits(Bits, <<SubBits:Len/integer-unsigned-little-unit:1, _/bits>>,
+                      <<SubBits:Sz/integer-unsigned-little-unit:1>>);
+do_get_subbits(Bits, Sz, Len, <<"float">>, <<"unsigned">>, <<"little">>) ->
+    ?match_bits(Bits, <<SubBits:Len/float-unsigned-little-unit:1, _/bits>>,
+                      <<SubBits:Sz/float-unsigned-little-unit:1>>);
+do_get_subbits(Bits, Sz, Len, <<"bits">>, <<"unsigned">>, <<"little">>) ->
+    ?match_bits(Bits, <<SubBits:Len/bits-unsigned-little-unit:1, _/bits>>,
+                      <<SubBits:Sz/bits-unsigned-little-unit:1>>);
+
+do_get_subbits(Bits, Sz, Len, <<"integer">>, <<"signed">>, <<"little">>) ->
+    ?match_bits(Bits, <<SubBits:Len/integer-signed-little-unit:1, _/bits>>,
+                      <<SubBits:Sz/integer-signed-little-unit:1>>);
+do_get_subbits(Bits, Sz, Len, <<"float">>, <<"signed">>, <<"little">>) ->
+    ?match_bits(Bits, <<SubBits:Len/float-signed-little-unit:1, _/bits>>,
+                      <<SubBits:Sz/float-signed-little-unit:1>>);
+do_get_subbits(Bits, Sz, Len, <<"bits">>, <<"signed">>, <<"little">>) ->
+    ?match_bits(Bits, <<SubBits:Len/bits-signed-little-unit:1, _/bits>>,
+                      <<SubBits:Sz/bits-signed-little-unit:1>>).
+
 %%------------------------------------------------------------------------------
 %% Data Type Convertion Funcs
 %%------------------------------------------------------------------------------
@@ -422,6 +518,12 @@ float(Data) ->
 
 map(Data) ->
     emqx_rule_utils:map(Data).
+
+bin2hexstr(Bin) when is_binary(Bin) ->
+    emqx_misc:bin2hexstr_A_F(Bin).
+
+hexstr2bin(Str) when is_binary(Str) ->
+    emqx_misc:hexstr2bin(Str).
 
 %%------------------------------------------------------------------------------
 %% NULL Funcs
@@ -515,25 +617,28 @@ sprintf_s(Format, Args) when is_list(Args) ->
     erlang:iolist_to_binary(io_lib:format(binary_to_list(Format), Args)).
 
 pad(S, Len) when is_binary(S), is_integer(Len) ->
-   iolist_to_binary(string:pad(S, Len, trailing)).
+    iolist_to_binary(string:pad(S, Len, trailing)).
 
 pad(S, Len, <<"trailing">>) when is_binary(S), is_integer(Len) ->
-   iolist_to_binary(string:pad(S, Len, trailing));
+    iolist_to_binary(string:pad(S, Len, trailing));
 
 pad(S, Len, <<"both">>) when is_binary(S), is_integer(Len) ->
-   iolist_to_binary(string:pad(S, Len, both));
+    iolist_to_binary(string:pad(S, Len, both));
 
 pad(S, Len, <<"leading">>) when is_binary(S), is_integer(Len) ->
-   iolist_to_binary(string:pad(S, Len, leading)).
+    iolist_to_binary(string:pad(S, Len, leading)).
 
 pad(S, Len, <<"trailing">>, Char) when is_binary(S), is_integer(Len), is_binary(Char) ->
-   iolist_to_binary(string:pad(S, Len, trailing, Char));
+    Chars = unicode:characters_to_list(Char, utf8),
+    iolist_to_binary(string:pad(S, Len, trailing, Chars));
 
 pad(S, Len, <<"both">>, Char) when is_binary(S), is_integer(Len), is_binary(Char) ->
-   iolist_to_binary(string:pad(S, Len, both, Char));
+    Chars = unicode:characters_to_list(Char, utf8),
+    iolist_to_binary(string:pad(S, Len, both, Chars));
 
 pad(S, Len, <<"leading">>, Char) when is_binary(S), is_integer(Len), is_binary(Char) ->
-   iolist_to_binary(string:pad(S, Len, leading, Char)).
+    Chars = unicode:characters_to_list(Char, utf8),
+    iolist_to_binary(string:pad(S, Len, leading, Chars)).
 
 replace(SrcStr, P, RepStr) when is_binary(SrcStr), is_binary(P), is_binary(RepStr) ->
     iolist_to_binary(string:replace(SrcStr, P, RepStr, all)).
@@ -677,17 +782,10 @@ sha256(S) when is_binary(S) ->
     hash(sha256, S).
 
 hash(Type, Data) ->
-    hexstring(crypto:hash(Type, Data)).
-
-hexstring(<<X:128/big-unsigned-integer>>) ->
-    iolist_to_binary(io_lib:format("~32.16.0b", [X]));
-hexstring(<<X:160/big-unsigned-integer>>) ->
-    iolist_to_binary(io_lib:format("~40.16.0b", [X]));
-hexstring(<<X:256/big-unsigned-integer>>) ->
-    iolist_to_binary(io_lib:format("~64.16.0b", [X])).
+    emqx_misc:bin2hexstr_a_f(crypto:hash(Type, Data)).
 
 %%------------------------------------------------------------------------------
-%% Base64 Funcs
+%% Data encode and decode Funcs
 %%------------------------------------------------------------------------------
 
 base64_encode(Data) when is_binary(Data) ->
@@ -702,6 +800,40 @@ json_encode(Data) ->
 json_decode(Data) ->
     emqx_json:decode(Data, [return_maps]).
 
+term_encode(Term) ->
+    erlang:term_to_binary(Term).
+
+term_decode(Data) when is_binary(Data) ->
+    erlang:binary_to_term(Data).
+
+%%------------------------------------------------------------------------------
+%% Dict Funcs
+%%------------------------------------------------------------------------------
+
+-define(DICT_KEY(KEY), {'@rule_engine', KEY}).
+proc_dict_get(Key) ->
+    erlang:get(?DICT_KEY(Key)).
+
+proc_dict_put(Key, Val) ->
+    erlang:put(?DICT_KEY(Key), Val).
+
+proc_dict_del(Key) ->
+    erlang:erase(?DICT_KEY(Key)).
+
+kv_store_put(Key, Val) ->
+    ets:insert(?KV_TAB, {Key, Val}).
+
+kv_store_get(Key) ->
+    kv_store_get(Key, undefined).
+kv_store_get(Key, Default) ->
+    case ets:lookup(?KV_TAB, Key) of
+        [{_, Val}] -> Val;
+        _ -> Default
+    end.
+
+kv_store_del(Key) ->
+    ets:delete(?KV_TAB, Key).
+
 %%--------------------------------------------------------------------
 %% Date functions
 %%--------------------------------------------------------------------
@@ -710,9 +842,22 @@ now_rfc3339() ->
     now_rfc3339(<<"second">>).
 
 now_rfc3339(Unit) ->
+    unix_ts_to_rfc3339(now_timestamp(Unit), Unit).
+
+unix_ts_to_rfc3339(Epoch) ->
+    unix_ts_to_rfc3339(Epoch, <<"second">>).
+
+unix_ts_to_rfc3339(Epoch, Unit) when is_integer(Epoch) ->
     emqx_rule_utils:bin(
         calendar:system_time_to_rfc3339(
-            now_timestamp(Unit), [{unit, time_unit(Unit)}])).
+            Epoch, [{unit, time_unit(Unit)}])).
+
+rfc3339_to_unix_ts(DateTime) ->
+    rfc3339_to_unix_ts(DateTime, <<"second">>).
+
+rfc3339_to_unix_ts(DateTime, Unit) when is_binary(DateTime) ->
+    calendar:rfc3339_to_system_time(binary_to_list(DateTime),
+        [{unit, time_unit(Unit)}]).
 
 now_timestamp() ->
     erlang:system_time(second).
@@ -729,6 +874,7 @@ time_unit(<<"nanosecond">>) -> nanosecond.
 %% Here the emqx_rule_funcs module acts as a proxy, forwarding
 %% the function handling to the worker module.
 %% @end
+-ifdef(EMQX_ENTERPRISE).
 '$handle_undefined_function'(schema_decode, [SchemaId, Data|MoreArgs]) ->
     emqx_schema_parser:decode(SchemaId, Data, MoreArgs);
 '$handle_undefined_function'(schema_decode, Args) ->
@@ -744,6 +890,13 @@ time_unit(<<"nanosecond">>) -> nanosecond.
 
 '$handle_undefined_function'(Fun, Args) ->
     error({sql_function_not_supported, function_literal(Fun, Args)}).
+-else.
+'$handle_undefined_function'(sprintf, [Format|Args]) ->
+    erlang:apply(fun sprintf_s/2, [Format, Args]);
+
+'$handle_undefined_function'(Fun, Args) ->
+    error({sql_function_not_supported, function_literal(Fun, Args)}).
+-endif. % EMQX_ENTERPRISE
 
 map_path(Key) ->
     {path, [{key, P} || P <- string:split(Key, ".", all)]}.

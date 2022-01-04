@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -19,14 +19,16 @@
 -behaviour(gen_server).
 
 -include("rule_engine.hrl").
--include("rule_events.hrl").
 -include_lib("emqx/include/logger.hrl").
+-include_lib("stdlib/include/qlc.hrl").
 
 -export([start_link/0]).
 
 %% Rule Management
 -export([ get_rules/0
         , get_rules_for/1
+        , get_rules_with_same_event/1
+        , get_rules_ordered_by_ts/0
         , get_rule/1
         , add_rule/1
         , add_rules/1
@@ -61,8 +63,14 @@
 %% Resource Types
 -export([ get_resource_types/0
         , find_resource_type/1
+        , find_rules_depends_on_resource/1
+        , find_enabled_rules_depends_on_resource/1
         , register_resource_types/1
         , unregister_resource_types_of/1
+        ]).
+
+-export([ load_hooks_for_rule/1
+        , unload_hooks_for_rule/1
         ]).
 
 %% for debug purposes
@@ -85,12 +93,7 @@
 
 -define(REGISTRY, ?MODULE).
 
-%% Statistics
--define(STATS,
-        [ {?RULE_TAB, 'rules.count', 'rules.max'}
-        , {?ACTION_TAB, 'actions.count', 'actions.max'}
-        , {?RES_TAB, 'resources.count', 'resources.max'}
-        ]).
+-define(T_CALL, 10000).
 
 %%------------------------------------------------------------------------------
 %% Mnesia bootstrap
@@ -132,13 +135,13 @@ mnesia(boot) ->
 
 mnesia(copy) ->
     %% Copy rule table
-    ok = ekka_mnesia:copy_table(?RULE_TAB),
+    ok = ekka_mnesia:copy_table(?RULE_TAB, disc_copies),
     %% Copy rule action table
-    ok = ekka_mnesia:copy_table(?ACTION_TAB),
+    ok = ekka_mnesia:copy_table(?ACTION_TAB, ram_copies),
     %% Copy resource table
-    ok = ekka_mnesia:copy_table(?RES_TAB),
+    ok = ekka_mnesia:copy_table(?RES_TAB, disc_copies),
     %% Copy resource type table
-    ok = ekka_mnesia:copy_table(?RES_TYPE_TAB).
+    ok = ekka_mnesia:copy_table(?RES_TYPE_TAB, ram_copies).
 
 dump() ->
     io:format("Rules: ~p~n"
@@ -166,10 +169,27 @@ start_link() ->
 get_rules() ->
     get_all_records(?RULE_TAB).
 
+get_rules_ordered_by_ts() ->
+    F = fun() ->
+        Query = qlc:q([E || E <- mnesia:table(?RULE_TAB)]),
+        qlc:e(qlc:keysort(#rule.created_at, Query, [{order, ascending}]))
+    end,
+    {atomic, List} = mnesia:transaction(F),
+    List.
+
 -spec(get_rules_for(Topic :: binary()) -> list(emqx_rule_engine:rule())).
 get_rules_for(Topic) ->
     [Rule || Rule = #rule{for = For} <- get_rules(),
-             Topic =:= For orelse emqx_rule_utils:can_topic_match_oneof(Topic, For)].
+             emqx_rule_utils:can_topic_match_oneof(Topic, For)].
+
+-spec(get_rules_with_same_event(Topic :: binary()) -> list(emqx_rule_engine:rule())).
+get_rules_with_same_event(Topic) ->
+    EventName = emqx_rule_events:event_name(Topic),
+    [Rule || Rule = #rule{for = For} <- get_rules(),
+             lists:any(fun(T) -> is_of_event_name(EventName, T) end, For)].
+
+is_of_event_name(EventName, Topic) ->
+    EventName =:= emqx_rule_events:event_name(Topic).
 
 -spec(get_rule(Id :: rule_id()) -> {ok, emqx_rule_engine:rule()} | not_found).
 get_rule(Id) ->
@@ -180,22 +200,23 @@ get_rule(Id) ->
 
 -spec(add_rule(emqx_rule_engine:rule()) -> ok).
 add_rule(Rule) when is_record(Rule, rule) ->
-    trans(fun insert_rule/1, [Rule]).
+    add_rules([Rule]).
 
 -spec(add_rules(list(emqx_rule_engine:rule())) -> ok).
 add_rules(Rules) ->
-    trans(fun lists:foreach/2, [fun insert_rule/1, Rules]).
+    gen_server:call(?REGISTRY, {add_rules, Rules}, ?T_CALL).
 
 -spec(remove_rule(emqx_rule_engine:rule() | rule_id()) -> ok).
 remove_rule(RuleOrId) ->
-    trans(fun delete_rule/1, [RuleOrId]).
+    remove_rules([RuleOrId]).
 
 -spec(remove_rules(list(emqx_rule_engine:rule()) | list(rule_id())) -> ok).
 remove_rules(Rules) ->
-    trans(fun lists:foreach/2, [fun delete_rule/1, Rules]).
+    gen_server:call(?REGISTRY, {remove_rules, Rules}, ?T_CALL).
 
 %% @private
-insert_rule(Rule = #rule{}) ->
+insert_rule(Rule) ->
+    _ = ?CLUSTER_CALL(load_hooks_for_rule, [Rule]),
     mnesia:write(?RULE_TAB, Rule, write).
 
 %% @private
@@ -204,8 +225,21 @@ delete_rule(RuleId) when is_binary(RuleId) ->
         {ok, Rule} -> delete_rule(Rule);
         not_found -> ok
     end;
-delete_rule(Rule = #rule{}) when is_record(Rule, rule) ->
+delete_rule(Rule) ->
+    _ = ?CLUSTER_CALL(unload_hooks_for_rule, [Rule]),
     mnesia:delete_object(?RULE_TAB, Rule, write).
+
+load_hooks_for_rule(#rule{for = Topics}) ->
+    lists:foreach(fun emqx_rule_events:load/1, Topics).
+
+unload_hooks_for_rule(#rule{id = Id, for = Topics}) ->
+    lists:foreach(fun(Topic) ->
+            case get_rules_with_same_event(Topic) of
+                [#rule{id = Id}] -> %% we are now deleting the last rule
+                    emqx_rule_events:unload(Topic);
+                _ -> ok
+            end
+        end, Topics).
 
 %%------------------------------------------------------------------------------
 %% Action Management
@@ -315,7 +349,7 @@ find_resource_params(Id) ->
         [] -> not_found
     end.
 
--spec(remove_resource(emqx_rule_engine:resource() | emqx_rule_engine:resource_id()) -> ok).
+-spec(remove_resource(emqx_rule_engine:resource() | emqx_rule_engine:resource_id()) -> ok | {error, term()}).
 remove_resource(Resource) when is_record(Resource, resource) ->
     trans(fun delete_resource/1, [Resource#resource.id]);
 
@@ -329,14 +363,34 @@ remove_resource_params(ResId) ->
 
 %% @private
 delete_resource(ResId) ->
-    [[ResId =:= ResId1 andalso throw({dependency_exists, {rule, Id}})
-        || #action_instance{args = #{<<"$resource">> := ResId1}} <- Actions]
-            || #rule{id = Id, actions = Actions} <- get_rules()],
-    mnesia:delete(?RES_TAB, ResId, write).
+    case find_enabled_rules_depends_on_resource(ResId) of
+        [] -> mnesia:delete(?RES_TAB, ResId, write);
+        Rules ->
+            {error, {dependent_rules_exists, [Id || #rule{id = Id} <- Rules]}}
+    end.
 
 %% @private
 insert_resource(Resource) ->
     mnesia:write(?RES_TAB, Resource, write).
+
+find_enabled_rules_depends_on_resource(ResId) ->
+    [R || #rule{enabled = true} = R <- find_rules_depends_on_resource(ResId)].
+
+find_rules_depends_on_resource(ResId) ->
+    lists:foldl(fun(#rule{actions = Actions} = R, Rules) ->
+        case search_action_despends_on_resource(ResId, Actions) of
+            false -> Rules;
+            {value, _} -> [R | Rules]
+        end
+    end, [], get_rules()).
+
+search_action_despends_on_resource(ResId, Actions) ->
+    lists:search(fun
+        (#action_instance{args = #{<<"$resource">> := ResId0}}) ->
+            ResId0 =:= ResId;
+        (_) ->
+            false
+    end, Actions).
 
 %%------------------------------------------------------------------------------
 %% Resource Type Management
@@ -381,9 +435,17 @@ delete_resource_type(Type) ->
 %%------------------------------------------------------------------------------
 
 init([]) ->
-    %% Enable stats timer
-    ok = emqx_stats:update_interval(rule_registery_stats, fun update_stats/0),
+    _TableId = ets:new(?KV_TAB, [named_table, set, public, {write_concurrency, true},
+                                 {read_concurrency, true}]),
     {ok, #{}}.
+
+handle_call({add_rules, Rules}, _From, State) ->
+    trans(fun lists:foreach/2, [fun insert_rule/1, Rules]),
+    {reply, ok, State};
+
+handle_call({remove_rules, Rules}, _From, State) ->
+    trans(fun lists:foreach/2, [fun delete_rule/1, Rules]),
+    {reply, ok, State};
 
 handle_call(Req, _From, State) ->
     ?LOG(error, "[RuleRegistry]: unexpected call - ~p", [Req]),
@@ -398,7 +460,7 @@ handle_info(Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, _State) ->
-    emqx_stats:cancel_update(rule_registery_stats).
+    ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -407,13 +469,6 @@ code_change(_OldVsn, State, _Extra) ->
 %% Private functions
 %%------------------------------------------------------------------------------
 
-update_stats() ->
-    lists:foreach(
-      fun({Tab, Stat, MaxStat}) ->
-              Size = mnesia:table_info(Tab, size),
-              emqx_stats:setstat(Stat, MaxStat, Size)
-      end, ?STATS).
-
 get_all_records(Tab) ->
     %mnesia:dirty_match_object(Tab, mnesia:table_info(Tab, wild_pattern)).
     ets:tab2list(Tab).
@@ -421,6 +476,6 @@ get_all_records(Tab) ->
 trans(Fun) -> trans(Fun, []).
 trans(Fun, Args) ->
     case mnesia:transaction(Fun, Args) of
-        {atomic, ok} -> ok;
+        {atomic, Result} -> Result;
         {aborted, Reason} -> error(Reason)
     end.

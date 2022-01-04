@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -34,6 +34,8 @@ groups() ->
         [ t_action
         , t_rule
         , t_clear
+        , t_no_creation_1
+        , t_no_creation_2
         ]},
     {speed, [sequence],
         [ rule_speed
@@ -59,43 +61,62 @@ init_per_testcase(_, Config) ->
 end_per_testcase(_, _Config) ->
     ok.
 
+t_no_creation_1(_) ->
+    ?assertEqual(ok, emqx_rule_metrics:inc_rules_matched(<<"rule1">>)).
+
+t_no_creation_2(_) ->
+    ?assertEqual(ok, emqx_rule_metrics:inc_actions_taken(<<"action:0">>)).
+
 t_action(_) ->
-    ?assertEqual(0, emqx_rule_metrics:get(<<"action:1">>, 'actions.success')),
-    ?assertEqual(0, emqx_rule_metrics:get(<<"action:1">>, 'actions.failure')),
-    ?assertEqual(0, emqx_rule_metrics:get(<<"action:2">>, 'actions.success')),
-    ok = emqx_rule_metrics:inc(<<"action:1">>, 'actions.success'),
-    ok = emqx_rule_metrics:inc(<<"action:1">>, 'actions.failure'),
-    ok = emqx_rule_metrics:inc(<<"action:2">>, 'actions.success'),
-    ok = emqx_rule_metrics:inc(<<"action:2">>, 'actions.success'),
-    ?assertEqual(1, emqx_rule_metrics:get(<<"action:1">>, 'actions.success')),
-    ?assertEqual(1, emqx_rule_metrics:get(<<"action:1">>, 'actions.failure')),
-    ?assertEqual(2, emqx_rule_metrics:get(<<"action:2">>, 'actions.success')),
-    ?assertEqual(0, emqx_rule_metrics:get(<<"action:3">>, 'actions.success')),
-    ?assertEqual(3, emqx_rule_metrics:get_overall('actions.success')),
-    ?assertEqual(1, emqx_rule_metrics:get_overall('actions.failure')).
+    ?assertEqual(0, emqx_rule_metrics:get_actions_taken(<<"action:1">>)),
+    ?assertEqual(0, emqx_rule_metrics:get_actions_exception(<<"action:1">>)),
+    ?assertEqual(0, emqx_rule_metrics:get_actions_taken(<<"action:2">>)),
+    ok = emqx_rule_metrics:create_metrics(<<"action:1">>),
+    ok = emqx_rule_metrics:create_metrics(<<"action:2">>),
+    ok = emqx_rule_metrics:inc_actions_taken(<<"action:1">>),
+    ok = emqx_rule_metrics:inc_actions_exception(<<"action:1">>),
+    ok = emqx_rule_metrics:inc_actions_taken(<<"action:2">>),
+    ok = emqx_rule_metrics:inc_actions_taken(<<"action:2">>),
+    ?assertEqual(1, emqx_rule_metrics:get_actions_taken(<<"action:1">>)),
+    ?assertEqual(1, emqx_rule_metrics:get_actions_exception(<<"action:1">>)),
+    ?assertEqual(2, emqx_rule_metrics:get_actions_taken(<<"action:2">>)),
+    ?assertEqual(0, emqx_rule_metrics:get_actions_taken(<<"action:3">>)),
+    ?assertEqual(3, emqx_rule_metrics:get_overall('actions.taken')),
+    ?assertEqual(1, emqx_rule_metrics:get_overall('actions.exception')),
+    ok = emqx_rule_metrics:clear_metrics(<<"action:1">>),
+    ok = emqx_rule_metrics:clear_metrics(<<"action:2">>),
+    ?assertEqual(0, emqx_rule_metrics:get_actions_taken(<<"action:1">>)),
+    ?assertEqual(0, emqx_rule_metrics:get_actions_taken(<<"action:2">>)).
 
 t_rule(_) ->
+    ok = emqx_rule_metrics:create_rule_metrics(<<"rule:1">>),
+    ok = emqx_rule_metrics:create_rule_metrics(<<"rule2">>),
     ok = emqx_rule_metrics:inc(<<"rule:1">>, 'rules.matched'),
-    ok = emqx_rule_metrics:inc(<<"rule:2">>, 'rules.matched'),
-    ok = emqx_rule_metrics:inc(<<"rule:2">>, 'rules.matched'),
+    ok = emqx_rule_metrics:inc(<<"rule2">>, 'rules.matched'),
+    ok = emqx_rule_metrics:inc(<<"rule2">>, 'rules.matched'),
     ?assertEqual(1, emqx_rule_metrics:get(<<"rule:1">>, 'rules.matched')),
-    ?assertEqual(2, emqx_rule_metrics:get(<<"rule:2">>, 'rules.matched')),
-    ?assertEqual(0, emqx_rule_metrics:get(<<"rule:3">>, 'rules.matched')),
-    ?assertEqual(3, emqx_rule_metrics:get_overall('rules.matched')).
+    ?assertEqual(2, emqx_rule_metrics:get(<<"rule2">>, 'rules.matched')),
+    ?assertEqual(0, emqx_rule_metrics:get(<<"rule3">>, 'rules.matched')),
+    ?assertEqual(3, emqx_rule_metrics:get_overall('rules.matched')),
+    ok = emqx_rule_metrics:clear_rule_metrics(<<"rule:1">>),
+    ok = emqx_rule_metrics:clear_rule_metrics(<<"rule2">>).
 
 t_clear(_) ->
-    ok = emqx_rule_metrics:inc(<<"action:1">>, 'actions.success'),
-    ?assertEqual(1, emqx_rule_metrics:get(<<"action:1">>, 'actions.success')),
-    ok = emqx_rule_metrics:clear(<<"action:1">>),
-    ?assertEqual(0, emqx_rule_metrics:get(<<"action:1">>, 'actions.success')).
+    ok = emqx_rule_metrics:create_metrics(<<"action:1">>),
+    ok = emqx_rule_metrics:inc_actions_taken(<<"action:1">>),
+    ?assertEqual(1, emqx_rule_metrics:get_actions_taken(<<"action:1">>)),
+    ok = emqx_rule_metrics:clear_metrics(<<"action:1">>),
+    ?assertEqual(0, emqx_rule_metrics:get_actions_taken(<<"action:1">>)).
 
 rule_speed(_) ->
-    ok = emqx_rule_metrics:inc(<<"rule:1">>, 'rules.matched'),
-    ok = emqx_rule_metrics:inc(<<"rule:1">>, 'rules.matched'),
+    ok = emqx_rule_metrics:create_rule_metrics(<<"rule1">>),
+    ok = emqx_rule_metrics:create_rule_metrics(<<"rule:2">>),
+    ok = emqx_rule_metrics:inc(<<"rule1">>, 'rules.matched'),
+    ok = emqx_rule_metrics:inc(<<"rule1">>, 'rules.matched'),
     ok = emqx_rule_metrics:inc(<<"rule:2">>, 'rules.matched'),
-    ?assertEqual(2, emqx_rule_metrics:get(<<"rule:1">>, 'rules.matched')),
+    ?assertEqual(2, emqx_rule_metrics:get(<<"rule1">>, 'rules.matched')),
     ct:sleep(1000),
-    ?LET(#{max := Max, current := Current}, emqx_rule_metrics:get_rule_speed(<<"rule:1">>),
+    ?LET(#{max := Max, current := Current}, emqx_rule_metrics:get_rule_speed(<<"rule1">>),
          {?assert(Max =< 2),
           ?assert(Current =< 2)}),
     ct:pal("===== Speed: ~p~n", [emqx_rule_metrics:get_overall_rule_speed()]),
@@ -103,7 +124,7 @@ rule_speed(_) ->
          {?assert(Max =< 3),
           ?assert(Current =< 3)}),
     ct:sleep(2100),
-    ?LET(#{max := Max, current := Current, last5m := Last5Min}, emqx_rule_metrics:get_rule_speed(<<"rule:1">>),
+    ?LET(#{max := Max, current := Current, last5m := Last5Min}, emqx_rule_metrics:get_rule_speed(<<"rule1">>),
          {?assert(Max =< 2),
           ?assert(Current == 0),
           ?assert(Last5Min =< 0.67)}),
@@ -115,7 +136,9 @@ rule_speed(_) ->
     ?LET(#{max := Max, current := Current, last5m := Last5Min}, emqx_rule_metrics:get_overall_rule_speed(),
          {?assert(Max =< 3),
           ?assert(Current == 0),
-          ?assert(Last5Min == 0)}).
+          ?assert(Last5Min == 0)}),
+    ok = emqx_rule_metrics:clear_rule_metrics(<<"rule1">>),
+    ok = emqx_rule_metrics:clear_rule_metrics(<<"rule:2">>).
 
 % t_create(_) ->
 %     error('TODO').

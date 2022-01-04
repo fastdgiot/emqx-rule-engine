@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -142,6 +142,40 @@ t_bool(_) ->
     ?assertEqual(false, emqx_rule_funcs:bool(false)),
     ?assertEqual(false, emqx_rule_funcs:bool(<<"false">>)),
     ?assertError({invalid_boolean, _}, emqx_rule_funcs:bool(3)).
+
+t_proc_dict_put_get_del(_) ->
+    ?assertEqual(undefined, emqx_rule_funcs:proc_dict_get(<<"abc">>)),
+    emqx_rule_funcs:proc_dict_put(<<"abc">>, 1),
+    ?assertEqual(1, emqx_rule_funcs:proc_dict_get(<<"abc">>)),
+    emqx_rule_funcs:proc_dict_del(<<"abc">>),
+    ?assertEqual(undefined, emqx_rule_funcs:proc_dict_get(<<"abc">>)).
+
+t_term_encode(_) ->
+    TestData = [<<"abc">>, #{a => 1}, #{<<"3">> => [1,2,4]}],
+    lists:foreach(fun(Data) ->
+            ?assertEqual(Data,
+                emqx_rule_funcs:term_decode(
+                    emqx_rule_funcs:term_encode(Data)))
+        end, TestData).
+
+t_hexstr2bin(_) ->
+    ?assertEqual(<<1,2>>, emqx_rule_funcs:hexstr2bin(<<"0102">>)),
+    ?assertEqual(<<17,33>>, emqx_rule_funcs:hexstr2bin(<<"1121">>)).
+
+t_bin2hexstr(_) ->
+    ?assertEqual(<<"0102">>, emqx_rule_funcs:bin2hexstr(<<1,2>>)),
+    ?assertEqual(<<"1121">>, emqx_rule_funcs:bin2hexstr(<<17,33>>)).
+
+t_hex_convert(_) ->
+    ?PROPTEST(hex_convert).
+
+hex_convert() ->
+    ?FORALL(L, list(range(0, 255)),
+            begin
+                AbitraryBin = list_to_binary(L),
+                AbitraryBin == emqx_rule_funcs:hexstr2bin(
+                    emqx_rule_funcs:bin2hexstr(AbitraryBin))
+            end).
 
 t_is_null(_) ->
     ?assertEqual(true, emqx_rule_funcs:is_null(undefined)),
@@ -491,24 +525,74 @@ t_map_get(_) ->
     ?assertEqual(1, apply_func(map_get, [<<"a">>, #{a => 1}])),
     ?assertEqual(undefined, apply_func(map_get, [<<"a">>, #{}])),
     ?assertEqual(1, apply_func(map_get, [<<"a.b">>, #{a => #{b => 1}}])),
-    ?assertEqual(undefined, apply_func(map_get, [<<"a.c">>, #{a => #{b => 1}}])).
+    ?assertEqual(undefined, apply_func(map_get, [<<"a.c">>, #{a => #{b => 1}}])),
+    ?assertEqual(undefined, apply_func(map_get, [<<"a">>, #{}])).
 
 t_map_put(_) ->
     ?assertEqual(#{<<"a">> => 1}, apply_func(map_put, [<<"a">>, 1, #{}])),
     ?assertEqual(#{a => 2}, apply_func(map_put, [<<"a">>, 2, #{a => 1}])),
     ?assertEqual(#{<<"a">> => #{<<"b">> => 1}}, apply_func(map_put, [<<"a.b">>, 1, #{}])),
-    ?assertEqual(#{a => #{b => 1, <<"c">> => 1}}, apply_func(map_put, [<<"a.c">>, 1, #{a => #{b => 1}}])).
+    ?assertEqual(#{a => #{b => 1, <<"c">> => 1}}, apply_func(map_put, [<<"a.c">>, 1, #{a => #{b => 1}}])),
+    ?assertEqual(#{a => 2}, apply_func(map_put, [<<"a">>, 2, #{a => 1}])).
 
- t_mget(_) ->
+t_mget(_) ->
     ?assertEqual(1, apply_func(map_get, [<<"a">>, #{a => 1}])),
     ?assertEqual(1, apply_func(map_get, [<<"a">>, #{<<"a">> => 1}])),
     ?assertEqual(undefined, apply_func(map_get, [<<"a">>, #{}])).
 
- t_mput(_) ->
+t_mput(_) ->
     ?assertEqual(#{<<"a">> => 1}, apply_func(map_put, [<<"a">>, 1, #{}])),
     ?assertEqual(#{<<"a">> => 2}, apply_func(map_put, [<<"a">>, 2, #{<<"a">> => 1}])),
     ?assertEqual(#{a => 2}, apply_func(map_put, [<<"a">>, 2, #{a => 1}])).
 
+t_bitsize(_) ->
+    ?assertEqual(8, apply_func(bitsize, [<<"a">>])),
+    ?assertEqual(4, apply_func(bitsize, [<<15:4>>])).
+
+t_subbits(_) ->
+    ?assertEqual(1, apply_func(subbits, [<<255:8>>, 1])),
+    ?assertEqual(3, apply_func(subbits, [<<255:8>>, 2])),
+    ?assertEqual(7, apply_func(subbits, [<<255:8>>, 3])),
+    ?assertEqual(15, apply_func(subbits, [<<255:8>>, 4])),
+    ?assertEqual(31, apply_func(subbits, [<<255:8>>, 5])),
+    ?assertEqual(63, apply_func(subbits, [<<255:8>>, 6])),
+    ?assertEqual(127, apply_func(subbits, [<<255:8>>, 7])),
+    ?assertEqual(255, apply_func(subbits, [<<255:8>>, 8])).
+
+t_subbits2(_) ->
+    ?assertEqual(1, apply_func(subbits, [<<255:8>>, 1, 1])),
+    ?assertEqual(3, apply_func(subbits, [<<255:8>>, 1, 2])),
+    ?assertEqual(7, apply_func(subbits, [<<255:8>>, 1, 3])),
+    ?assertEqual(15, apply_func(subbits, [<<255:8>>, 1, 4])),
+    ?assertEqual(31, apply_func(subbits, [<<255:8>>, 1, 5])),
+    ?assertEqual(63, apply_func(subbits, [<<255:8>>, 1, 6])),
+    ?assertEqual(127, apply_func(subbits, [<<255:8>>, 1, 7])),
+    ?assertEqual(255, apply_func(subbits, [<<255:8>>, 1, 8])).
+
+t_subbits2_1(_) ->
+    ?assertEqual(1, apply_func(subbits, [<<255:8>>, 2, 1])),
+    ?assertEqual(3, apply_func(subbits, [<<255:8>>, 2, 2])),
+    ?assertEqual(7, apply_func(subbits, [<<255:8>>, 2, 3])),
+    ?assertEqual(15, apply_func(subbits, [<<255:8>>, 2, 4])),
+    ?assertEqual(31, apply_func(subbits, [<<255:8>>, 2, 5])),
+    ?assertEqual(63, apply_func(subbits, [<<255:8>>, 2, 6])),
+    ?assertEqual(127, apply_func(subbits, [<<255:8>>, 2, 7])),
+    ?assertEqual(127, apply_func(subbits, [<<255:8>>, 2, 8])).
+t_subbits2_integer(_) ->
+    ?assertEqual(456, apply_func(subbits, [<<456:32/integer>>, 1, 32, <<"integer">>, <<"signed">>, <<"big">>])),
+    ?assertEqual(-456, apply_func(subbits, [<<-456:32/integer>>, 1, 32, <<"integer">>, <<"signed">>, <<"big">>])).
+
+t_subbits2_float(_) ->
+    R = apply_func(subbits, [<<5.3:64/float>>, 1, 64, <<"float">>, <<"unsigned">>, <<"big">>]),
+    RL = (5.3 - R),
+    ct:pal(";;;;~p", [R]),
+    ?assert( (RL >= 0 andalso RL < 0.0001) orelse (RL =< 0 andalso RL > -0.0001)),
+
+    R2 = apply_func(subbits, [<<-5.3:64/float>>, 1, 64, <<"float">>, <<"signed">>, <<"big">>]),
+
+    RL2 = (5.3 + R2),
+    ct:pal(";;;;~p", [R2]),
+    ?assert( (RL2 >= 0 andalso RL2 < 0.0001) orelse (RL2 =< 0 andalso RL2 > -0.0001)).
 
 %%------------------------------------------------------------------------------
 %% Test cases for Hash funcs
@@ -562,6 +646,23 @@ t_now_timestamp_1(_) ->
     [?assert(is_integer(
             apply_func(now_timestamp, [atom_to_binary(Unit, utf8)])))
      || Unit <- [second,millisecond,microsecond,nanosecond]].
+
+t_unix_ts_to_rfc3339(_) ->
+    [begin
+        BUnit = atom_to_binary(Unit, utf8),
+        Epoch = apply_func(now_timestamp, [BUnit]),
+        DateTime = apply_func(unix_ts_to_rfc3339, [Epoch, BUnit]),
+        ?assertEqual(Epoch,
+            calendar:rfc3339_to_system_time(binary_to_list(DateTime), [{unit, Unit}]))
+     end || Unit <- [second,millisecond,microsecond,nanosecond]].
+
+t_rfc3339_to_unix_ts(_) ->
+    [begin
+        BUnit = atom_to_binary(Unit, utf8),
+        Epoch = apply_func(now_timestamp, [BUnit]),
+        DateTime = apply_func(unix_ts_to_rfc3339, [Epoch, BUnit]),
+        ?assertEqual(Epoch, emqx_rule_funcs:rfc3339_to_unix_ts(DateTime, BUnit))
+     end || Unit <- [second,millisecond,microsecond,nanosecond]].
 
 %%------------------------------------------------------------------------------
 %% Utility functions

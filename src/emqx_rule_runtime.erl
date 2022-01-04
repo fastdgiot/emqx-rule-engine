@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -31,6 +31,8 @@
         , range_get/3
         ]).
 
+-compile({no_auto_import,[alias/1]}).
+
 -type(input() :: map()).
 -type(alias() :: atom()).
 -type(collection() :: {alias(), [term()]}).
@@ -38,7 +40,7 @@
 -define(ephemeral_alias(TYPE, NAME),
     iolist_to_binary(io_lib:format("_v_~s_~p_~p", [TYPE, NAME, erlang:system_time()]))).
 
--define(ActionMaxRetry, 1).
+-define(ActionMaxRetry, 3).
 
 %%------------------------------------------------------------------------------
 %% Apply rules
@@ -49,7 +51,7 @@ apply_rules([], _Input) ->
 apply_rules([#rule{enabled = false}|More], Input) ->
     apply_rules(More, Input);
 apply_rules([Rule = #rule{id = RuleID}|More], Input) ->
-    try apply_rule(Rule, Input)
+    try apply_rule_discard_result(Rule, Input)
     catch
         %% ignore the errors if select or match failed
         _:{select_and_transform_error, Error} ->
@@ -70,6 +72,10 @@ apply_rules([Rule = #rule{id = RuleID}|More], Input) ->
     end,
     apply_rules(More, Input).
 
+apply_rule_discard_result(Rule, Input) ->
+    _ = apply_rule(Rule, Input),
+    ok.
+
 apply_rule(Rule = #rule{id = RuleID}, Input) ->
     clear_rule_payload(),
     do_apply_rule(Rule, add_metadata(Input, #{rule_id => RuleID})).
@@ -83,10 +89,10 @@ do_apply_rule(#rule{id = RuleId,
                     on_action_failed = OnFailed,
                     actions = Actions}, Input) ->
     {Selected, Collection} = ?RAISE(select_and_collect(Fields, Input),
-                                        {select_and_collect_error, {_REASON_,_ST_}}),
+                                        {select_and_collect_error, {_EXCLASS_,_EXCPTION_,_ST_}}),
     ColumnsAndSelected = maps:merge(Input, Selected),
     case ?RAISE(match_conditions(Conditions, ColumnsAndSelected),
-                {match_conditions_error, {_REASON_,_ST_}}) of
+                {match_conditions_error, {_EXCLASS_,_EXCPTION_,_ST_}}) of
         true ->
             ok = emqx_rule_metrics:inc(RuleId, 'rules.matched'),
             Collection2 = filter_collection(Input, InCase, DoEach, Collection),
@@ -102,9 +108,9 @@ do_apply_rule(#rule{id = RuleId,
                     on_action_failed = OnFailed,
                     actions = Actions}, Input) ->
     Selected = ?RAISE(select_and_transform(Fields, Input),
-                      {select_and_transform_error, {_REASON_,_ST_}}),
+                      {select_and_transform_error, {_EXCLASS_,_EXCPTION_,_ST_}}),
     case ?RAISE(match_conditions(Conditions, maps:merge(Input, Selected)),
-                {match_conditions_error, {_REASON_,_ST_}}) of
+                {match_conditions_error, {_EXCLASS_,_EXCPTION_,_ST_}}) of
         true ->
             ok = emqx_rule_metrics:inc(RuleId, 'rules.matched'),
             {ok, take_actions(Actions, Selected, Input, OnFailed)};
@@ -160,16 +166,17 @@ select_and_collect([Field|More], Input, {Output, LastKV}) ->
         {nested_put(Key, Val, Output), LastKV}).
 
 %% Filter each item got from FOREACH
+-dialyzer({nowarn_function, filter_collection/4}).
 filter_collection(Input, InCase, DoEach, {CollKey, CollVal}) ->
     lists:filtermap(
         fun(Item) ->
             InputAndItem = maps:merge(Input, #{CollKey => Item}),
             case ?RAISE(match_conditions(InCase, InputAndItem),
-                    {match_incase_error, {_REASON_,_ST_}}) of
+                    {match_incase_error, {_EXCLASS_,_EXCPTION_,_ST_}}) of
                 true when DoEach == [] -> {true, InputAndItem};
                 true ->
                     {true, ?RAISE(select_and_transform(DoEach, InputAndItem),
-                                  {doeach_error, {_REASON_,_ST_}})};
+                                  {doeach_error, {_EXCLASS_,_EXCPTION_,_ST_}})};
                 false -> false
             end
         end, CollVal).
@@ -227,36 +234,75 @@ take_actions(Actions, Selected, Envs, OnFailed) ->
     [take_action(ActInst, Selected, Envs, OnFailed, ?ActionMaxRetry)
      || ActInst <- Actions].
 
-take_action(#action_instance{id = Id, fallbacks = Fallbacks} = ActInst,
+take_action(#action_instance{id = Id, name = ActName, fallbacks = Fallbacks} = ActInst,
             Selected, Envs, OnFailed, RetryN) when RetryN >= 0 ->
     try
         {ok, #action_instance_params{apply = Apply}}
             = emqx_rule_registry:get_action_instance_params(Id),
-        Result = Apply(Selected, Envs),
-        emqx_rule_metrics:inc(Id, 'actions.success'),
-        Result
+        emqx_rule_metrics:inc_actions_taken(Id),
+        apply_action_func(Selected, Envs, Apply, ActName)
+    of
+        {badact, Reason} ->
+            handle_action_failure(OnFailed, Id, Fallbacks, Selected, Envs, Reason);
+        Result -> Result
     catch
-        error:{badfun, Func}:_Stack ->
-            ?LOG(warning, "Action ~p maybe outdated, refresh it and try again."
-                          "Func: ~p", [Id, Func]),
-            _ = emqx_rule_engine:refresh_actions([ActInst]),
+        error:{badfun, _Func}:_ST ->
+            %?LOG(warning, "Action ~p maybe outdated, refresh it and try again."
+            %              "Func: ~p~nST:~0p", [Id, Func, ST]),
+            _ = trans_action_on(Id, fun() ->
+                emqx_rule_engine:refresh_actions([ActInst])
+            end, 5000),
+            emqx_rule_metrics:inc_actions_retry(Id),
             take_action(ActInst, Selected, Envs, OnFailed, RetryN-1);
         Error:Reason:Stack ->
+            emqx_rule_metrics:inc_actions_exception(Id),
             handle_action_failure(OnFailed, Id, Fallbacks, Selected, Envs, {Error, Reason, Stack})
     end;
 
 take_action(#action_instance{id = Id, fallbacks = Fallbacks}, Selected, Envs, OnFailed, _RetryN) ->
+    emqx_rule_metrics:inc_actions_error(Id),
     handle_action_failure(OnFailed, Id, Fallbacks, Selected, Envs, {max_try_reached, ?ActionMaxRetry}).
 
+apply_action_func(Data, Envs, #{mod := Mod, bindings := Bindings}, Name) ->
+    %% TODO: Build the Func Name when creating the action
+    Func = cbk_on_action_triggered(Name),
+    Mod:Func(Data, Envs#{'__bindings__' => Bindings});
+apply_action_func(Data, Envs, Func, _Name) when is_function(Func) ->
+    erlang:apply(Func, [Data, Envs]).
+
+cbk_on_action_triggered(Name) ->
+    list_to_atom("on_action_" ++ atom_to_list(Name)).
+
+trans_action_on(Id, Callback, Timeout) ->
+    case emqx_rule_locker:lock(Id) of
+        true -> try Callback() after emqx_rule_locker:unlock(Id) end;
+        _ ->
+            wait_action_on(Id, Timeout div 10)
+    end.
+
+wait_action_on(_, 0) ->
+    {error, timeout};
+wait_action_on(Id, RetryN) ->
+    timer:sleep(10),
+    case emqx_rule_registry:get_action_instance_params(Id) of
+        not_found ->
+            {error, not_found};
+        {ok, #action_instance_params{apply = Apply}} ->
+            case catch apply_action_func(baddata, #{}, Apply, tryit) of
+                {'EXIT', {{badfun, _}, _}} ->
+                    wait_action_on(Id, RetryN-1);
+                _ ->
+                    ok
+            end
+    end.
+
 handle_action_failure(continue, Id, Fallbacks, Selected, Envs, Reason) ->
-    emqx_rule_metrics:inc(Id, 'actions.failure'),
     ?LOG(error, "Take action ~p failed, continue next action, reason: ~0p", [Id, Reason]),
-    take_actions(Fallbacks, Selected, Envs, continue),
+    _ = take_actions(Fallbacks, Selected, Envs, continue),
     failed;
 handle_action_failure(stop, Id, Fallbacks, Selected, Envs, Reason) ->
-    emqx_rule_metrics:inc(Id, 'actions.failure'),
     ?LOG(error, "Take action ~p failed, skip all actions, reason: ~0p", [Id, Reason]),
-    take_actions(Fallbacks, Selected, Envs, continue),
+    _ = take_actions(Fallbacks, Selected, Envs, continue),
     error({take_action_failed, {Id, Reason}}).
 
 eval({path, [{key, <<"payload">>} | Path]}, #{payload := Payload}) ->

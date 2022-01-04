@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -24,21 +24,15 @@
 
 -export([stop/1]).
 
--define(APP, emqx_rule_engine).
-
 start(_Type, _Args) ->
     {ok, Sup} = emqx_rule_engine_sup:start_link(),
+    _ = emqx_rule_engine_sup:start_locker(),
     ok = emqx_rule_engine:load_providers(),
     ok = emqx_rule_engine:refresh_resources(),
     ok = emqx_rule_engine:refresh_rules(),
     ok = emqx_rule_engine_cli:load(),
-    ok = emqx_rule_events:load(env()),
     {ok, Sup}.
 
 stop(_State) ->
-    ok = emqx_rule_events:unload(env()),
+    ok = emqx_rule_events:unload(),
     ok = emqx_rule_engine_cli:unload().
-
-env() ->
-    application:get_all_env(?APP)
-    .

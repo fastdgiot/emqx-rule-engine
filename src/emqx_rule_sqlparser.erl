@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 -module(emqx_rule_sqlparser).
 
 -include("rule_engine.hrl").
--include("rule_events.hrl").
 
 -export([parse_select/1]).
 
@@ -49,6 +48,10 @@
 
 -export_type([select/0]).
 
+%% Dialyzer gives up on the generated code.
+%% probably due to stack depth, or inlines.
+-dialyzer({nowarn_function, [parse_select/1]}).
+
 %% Parse one select statement.
 -spec(parse_select(string() | binary())
       -> {ok, select()} | {parse_error, term()} | {lex_error, term()}).
@@ -76,7 +79,7 @@ parse_select(Sql) ->
         end
     catch
         _Error:Reason:StackTrace ->
-            {parse_error, Reason, StackTrace}
+            {parse_error, {Reason, StackTrace}}
     end.
 
 -spec(select_fields(select()) -> list(field())).

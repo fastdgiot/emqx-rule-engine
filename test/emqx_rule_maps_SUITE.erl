@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -43,9 +43,6 @@ t_nested_put_map(_) ->
     ?assertEqual(#{a => 1}, nested_put(?path([a]), 1, #{})),
     ?assertEqual(#{a => a}, nested_put(?path([a]), a, #{})),
     ?assertEqual(#{a => 1}, nested_put(?path([a]), 1, not_map)),
-    ?assertMatch(#{payload := #{<<"msg">> := <<"v">>}},
-        nested_put(?path([<<"payload">>, <<"msg">>]), <<"v">>,
-                   #{payload => <<"{\n  \"msg\": \"hello\"\n}">>})),
     ?assertEqual(#{a => #{b => b}}, nested_put(?path([a,b]), b, #{})),
     ?assertEqual(#{a => #{b => #{c => c}}}, nested_put(?path([a,b,c]), c, #{})),
     ?assertEqual(#{<<"k">> => v1}, nested_put(?path([k]), v1, #{<<"k">> => v0})),
@@ -94,9 +91,6 @@ t_nested_put_mix_map_index(_) ->
 
 t_nested_get_map(_) ->
     ?assertEqual(undefined, nested_get(?path([a]), not_map)),
-    ?assertEqual(<<"hello">>, nested_get(?path([msg]), <<"{\n  \"msg\": \"hello\"\n}">>)),
-    ?assertEqual(<<"hello">>, nested_get(?path([<<"msg">>]), <<"{\n  \"msg\": \"hello\"\n}">>)),
-    ?assertEqual(<<"hello">>, nested_get(?path([<<"payload">>, <<"msg">>]), #{payload => <<"{\n  \"msg\": \"hello\"\n}">>})),
     ?assertEqual(#{a => 1}, nested_get(?path([]), #{a => 1})),
     ?assertEqual(#{b => c}, nested_get(?path([a]), #{a => #{b => c}})),
     ?assertEqual(undefined, nested_get(?path([a,b,c]), not_map)),
@@ -106,6 +100,11 @@ t_nested_get_map(_) ->
     ?assertEqual(v1, nested_get(?path([p,x]), #{p => #{x => v1}})),
     ?assertEqual(v1, nested_get(?path([<<"p">>,<<"x">>]), #{p => #{x => v1}})),
     ?assertEqual(c, nested_get(?path([a,b,c]), #{a => #{b => #{c => c}}})).
+
+t_nested_get_map_1(_) ->
+    ?assertEqual(1, nested_get(?path([a]), <<"{\"a\": 1}">>)),
+    ?assertEqual(<<"{\"b\": 1}">>, nested_get(?path([a]), #{a => <<"{\"b\": 1}">>})),
+    ?assertEqual(1, nested_get(?path([a,b]), #{a => <<"{\"b\": 1}">>})).
 
 t_nested_get_index(_) ->
     %% single index get

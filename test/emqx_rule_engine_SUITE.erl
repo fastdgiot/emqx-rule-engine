@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -69,14 +69,18 @@ groups() ->
        t_resource_types_cli
       ]},
      {funcs, [],
-      [t_topic_func]},
+      [t_topic_func,
+       t_kv_store
+      ]},
      {registry, [sequence],
       [t_add_get_remove_rule,
        t_add_get_remove_rules,
        t_create_existing_rule,
        t_update_rule,
+       t_disable_rule,
        t_get_rules_for,
        t_get_rules_for_2,
+       t_get_rules_with_same_event,
        t_add_get_remove_action,
        t_add_get_remove_actions,
        t_remove_actions_of,
@@ -125,13 +129,15 @@ groups() ->
       [t_events
       ]},
      {bugs, [],
-      [t_sqlparse_payload_as
+      [t_sqlparse_payload_as,
+       t_sqlparse_nested_get
       ]},
      {multi_actions, [],
       [t_sqlselect_multi_actoins_1,
        t_sqlselect_multi_actoins_1_1,
        t_sqlselect_multi_actoins_2,
        t_sqlselect_multi_actoins_3,
+       t_sqlselect_multi_actoins_3_1,
        t_sqlselect_multi_actoins_4
       ]}
     ].
@@ -204,12 +210,19 @@ init_per_testcase(Test, Config)
             ;Test =:= t_sqlselect_multi_actoins_1_1
             ;Test =:= t_sqlselect_multi_actoins_2
             ;Test =:= t_sqlselect_multi_actoins_3
+            ;Test =:= t_sqlselect_multi_actoins_3_1
             ;Test =:= t_sqlselect_multi_actoins_4
         ->
     ok = emqx_rule_engine:load_providers(),
     ok = emqx_rule_registry:add_action(
             #action{name = 'crash_action', app = ?APP,
                     module = ?MODULE, on_create = crash_action,
+                    types=[], params_spec = #{},
+                    title = #{en => <<"Crash Action">>},
+                    description = #{en => <<"This action will always fail!">>}}),
+    ok = emqx_rule_registry:add_action(
+            #action{name = 'failure_action', app = ?APP,
+                    module = ?MODULE, on_create = failure_action,
                     types=[], params_spec = #{},
                     title = #{en => <<"Crash Action">>},
                     description = #{en => <<"This action will always fail!">>}}),
@@ -250,6 +263,7 @@ init_per_testcase(_TestCase, Config) ->
                 description = #{en => <<"The built in resource type for debug purpose">>}}]),
     %ct:pal("============ ~p", [ets:tab2list(emqx_resource_type)]),
     Config.
+
 
 end_per_testcase(t_events, Config) ->
     ets:delete(events_record_tab),
@@ -353,7 +367,7 @@ t_republish_action(_Config) ->
     end,
     emqtt:stop(Client),
     emqx_rule_registry:remove_rule(Id),
-    ?assertEqual(2, emqx_metrics:val('messages.qos0.received') - Qos0Received ),
+    ?assertEqual(2, emqx_metrics:val('messages.qos0.received') - Qos0Received),
     ?assertEqual(2, emqx_metrics:val('messages.received') - Received),
     ok.
 
@@ -362,16 +376,17 @@ t_republish_action(_Config) ->
 %%------------------------------------------------------------------------------
 
 t_crud_rule_api(_Config) ->
-    {ok, #{code := 0, data := Rule = #{id := RuleID}}} =
+    {ok, #{code := 0, data := Rule}} =
         emqx_rule_engine_api:create_rule(#{},
                 [{<<"name">>, <<"debug-rule">>},
                  {<<"rawsql">>, <<"select * from \"t/a\"">>},
                  {<<"actions">>, [[{<<"name">>,<<"inspect">>},
                                    {<<"params">>,[{<<"arg1">>,1}]}]]},
                  {<<"description">>, <<"debug rule">>}]),
+    RuleID = maps:get(id, Rule),
     %ct:pal("RCreated : ~p", [Rule]),
 
-    {ok, #{code := 0, data := Rules}} = emqx_rule_engine_api:list_rules(#{},[]),
+    {ok, #{code := 0, data := Rules}} = emqx_rule_engine_api:list_rules(#{}, []),
     %ct:pal("RList : ~p", [Rules]),
     ?assert(length(Rules) > 0),
 
@@ -382,10 +397,10 @@ t_crud_rule_api(_Config) ->
     {ok, #{code := 0, data := Rule2}} = emqx_rule_engine_api:update_rule(#{id => RuleID},
                 [{<<"rawsql">>, <<"select * from \"t/b\"">>}]),
 
-    {ok, #{code := 0, data := Rule3 = #{rawsql := SQL}}} = emqx_rule_engine_api:show_rule(#{id => RuleID}, []),
+    {ok, #{code := 0, data := Rule3}} = emqx_rule_engine_api:show_rule(#{id => RuleID}, []),
     %ct:pal("RShow : ~p", [Rule1]),
     ?assertEqual(Rule3, Rule2),
-    ?assertEqual(<<"select * from \"t/b\"">>, SQL),
+    ?assertEqual(<<"select * from \"t/b\"">>, maps:get(rawsql, Rule3)),
 
     {ok, #{code := 0, data := Rule4}} = emqx_rule_engine_api:update_rule(#{id => RuleID},
                 [{<<"actions">>,
@@ -400,58 +415,92 @@ t_crud_rule_api(_Config) ->
                     ]]
                  }]),
 
-    {ok, #{code := 0, data := Rule5 = #{actions := Actions}}}
-        = emqx_rule_engine_api:show_rule(#{id => RuleID}, []),
+    {ok, #{code := 0, data := Rule5}} = emqx_rule_engine_api:show_rule(#{id => RuleID}, []),
     %ct:pal("RShow : ~p", [Rule1]),
     ?assertEqual(Rule5, Rule4),
-    ?assertMatch([#{name := republish }], Actions),
+    ?assertMatch([#{name := republish }], maps:get(actions, Rule5)),
 
     ?assertMatch({ok, #{code := 0}}, emqx_rule_engine_api:delete_rule(#{id => RuleID}, [])),
 
     NotFound = emqx_rule_engine_api:show_rule(#{id => RuleID}, []),
     %ct:pal("Show After Deleted: ~p", [NotFound]),
-    ?assertMatch({ok, #{code := 404, message := _}}, NotFound),
+    ?assertMatch({ok, #{code := 404, message := _Message}}, NotFound),
     ok.
 
 t_list_actions_api(_Config) ->
-    {ok, #{code := 0, data := Actions}} = emqx_rule_engine_api:list_actions(#{},[]),
+    {ok, #{code := 0, data := Actions}} = emqx_rule_engine_api:list_actions(#{}, []),
     %ct:pal("RList : ~p", [Actions]),
     ?assert(length(Actions) > 0),
     ok.
 
 t_show_action_api(_Config) ->
-    ?assertMatch({ok, #{code := 0, data := #{name := 'inspect'}}},
-                 emqx_rule_engine_api:show_action(#{name => 'inspect'},[])),
+    {ok, #{code := 0, data := Actions}} = emqx_rule_engine_api:show_action(#{name => 'inspect'}, []),
+    ?assertEqual('inspect', maps:get(name, Actions)),
     ok.
 
 t_crud_resources_api(_Config) ->
-    {ok, #{code := 0, data := #{id := ResId}}} =
+    {ok, #{code := 0, data := Resources1}} =
         emqx_rule_engine_api:create_resource(#{},
             [{<<"name">>, <<"Simple Resource">>},
              {<<"type">>, <<"built_in">>},
              {<<"config">>, [{<<"a">>, 1}]},
              {<<"description">>, <<"Simple Resource">>}]),
-    {ok, #{code := 0, data := Resources}} = emqx_rule_engine_api:list_resources(#{},[]),
+    ResId = maps:get(id, Resources1),
+    {ok, #{code := 0, data := Resources}} = emqx_rule_engine_api:list_resources(#{}, []),
     ?assert(length(Resources) > 0),
-
-    ?assertMatch({ok, #{code := 0, data := #{id := ResId}}},
-                 emqx_rule_engine_api:show_resource(#{id => ResId},[])),
-
+    {ok, #{code := 0, data := Resources2}} = emqx_rule_engine_api:show_resource(#{id => ResId}, []),
+    ?assertEqual(ResId, maps:get(id, Resources2)),
+    %
+    {ok, #{code := 0}} = emqx_rule_engine_api:update_resource(#{id => ResId},
+                                                              [{<<"config">>, [{<<"a">>, 2}]},
+                                                               {<<"description">>, <<"2">>}]),
+    {ok, #{code := 0, data := Resources3}} = emqx_rule_engine_api:show_resource(#{id => ResId}, []),
+    ?assertEqual(ResId, maps:get(id, Resources3)),
+    ?assertEqual(#{<<"a">> => 2}, maps:get(config, Resources3)),
+    ?assertEqual(<<"2">>, maps:get(description, Resources3)),
+    %
+    {ok, #{code := 0}} = emqx_rule_engine_api:update_resource(#{id => ResId},
+                                                              [{<<"config">>, [{<<"a">>, 3}]}]),
+    {ok, #{code := 0, data := Resources4}} = emqx_rule_engine_api:show_resource(#{id => ResId}, []),
+    ?assertEqual(ResId, maps:get(id, Resources4)),
+    ?assertEqual(#{<<"a">> => 3}, maps:get(config, Resources4)),
+    ?assertEqual(<<"2">>, maps:get(description, Resources4)),
+    % Only config
+    {ok, #{code := 0}} = emqx_rule_engine_api:update_resource(#{id => ResId},
+                                                              [{<<"config">>, [{<<"a">>, 1},
+                                                                               {<<"b">>, 2},
+                                                                               {<<"c">>, 3}]}]),
+    {ok, #{code := 0, data := Resources5}} = emqx_rule_engine_api:show_resource(#{id => ResId}, []),
+    ?assertEqual(ResId, maps:get(id, Resources5)),
+    ?assertEqual(#{<<"a">> => 1, <<"b">> => 2, <<"c">> => 3}, maps:get(config, Resources5)),
+    ?assertEqual(<<"2">>, maps:get(description, Resources5)),
+    % Only description
+    {ok, #{code := 0}} = emqx_rule_engine_api:update_resource(#{id => ResId},
+                                                              [{<<"description">>, <<"new5">>}]),
+    {ok, #{code := 0, data := Resources6}} = emqx_rule_engine_api:show_resource(#{id => ResId}, []),
+    ?assertEqual(ResId, maps:get(id, Resources6)),
+    ?assertEqual(#{<<"a">> => 1, <<"b">> => 2, <<"c">> => 3}, maps:get(config, Resources6)),
+    ?assertEqual(<<"new5">>, maps:get(description, Resources6)),
+    % None
+    {ok, #{code := 0}} = emqx_rule_engine_api:update_resource(#{id => ResId}, []),
+    {ok, #{code := 0, data := Resources7}} = emqx_rule_engine_api:show_resource(#{id => ResId}, []),
+    ?assertEqual(ResId, maps:get(id, Resources7)),
+    ?assertEqual(#{<<"a">> => 1, <<"b">> => 2, <<"c">> => 3}, maps:get(config, Resources7)),
+    ?assertEqual(<<"new5">>, maps:get(description, Resources7)),
+    %
     ?assertMatch({ok, #{code := 0}}, emqx_rule_engine_api:delete_resource(#{id => ResId},#{})),
-
-    ?assertMatch({ok, #{code := 404}},
-                 emqx_rule_engine_api:show_resource(#{id => ResId},[])),
+    ?assertMatch({ok, #{code := 404}}, emqx_rule_engine_api:show_resource(#{id => ResId}, [])),
     ok.
 
 t_list_resource_types_api(_Config) ->
-    {ok, #{code := 0, data := ResourceTypes}} = emqx_rule_engine_api:list_resource_types(#{},[]),
+    {ok, #{code := 0, data := ResourceTypes}} = emqx_rule_engine_api:list_resource_types(#{}, []),
     ?assert(length(ResourceTypes) > 0),
     ok.
 
 t_show_resource_type_api(_Config) ->
-    RShow = emqx_rule_engine_api:show_resource_type(#{name => 'built_in'},[]),
+    {ok, #{code := 0, data := RShow}} = emqx_rule_engine_api:show_resource_type(#{name => 'built_in'}, []),
     %ct:pal("RShow : ~p", [RShow]),
-    ?assertMatch({ok, #{code := 0, data := #{name := built_in}} }, RShow),
+    ?assertEqual(built_in, maps:get(name, RShow)),
     ok.
 
 %%------------------------------------------------------------------------------
@@ -459,7 +508,7 @@ t_show_resource_type_api(_Config) ->
 %%------------------------------------------------------------------------------
 
 t_rules_cli(_Config) ->
-    print_mock(),
+    mock_print(),
     RCreate = emqx_rule_engine_cli:rules(["create",
                                           "select * from \"t1\" where topic='t1'",
                                           "[{\"name\":\"inspect\", \"params\": {\"arg1\": 1}}]",
@@ -491,10 +540,11 @@ t_rules_cli(_Config) ->
     RShow2 = emqx_rule_engine_cli:rules(["show", RuleId]),
     ?assertMatch({match, _}, re:run(RShow2, "Cannot found")),
     %ct:pal("RShow2 : ~p", [RShow2]),
+    unmock_print(),
     ok.
 
 t_actions_cli(_Config) ->
-    print_mock(),
+    mock_print(),
     RList = emqx_rule_engine_cli:actions(["list"]),
     ?assertMatch({match, _}, re:run(RList, "inspect")),
     %ct:pal("RList : ~p", [RList]),
@@ -502,10 +552,11 @@ t_actions_cli(_Config) ->
     RShow = emqx_rule_engine_cli:actions(["show", "inspect"]),
     ?assertMatch({match, _}, re:run(RShow, "inspect")),
     %ct:pal("RShow : ~p", [RShow]),
+    unmock_print(),
     ok.
 
 t_resources_cli(_Config) ->
-    print_mock(),
+    mock_print(),
     RCreate = emqx_rule_engine_cli:resources(["create", "built_in", "{\"a\" : 1}", "-d", "test resource"]),
     ResId = re:replace(re:replace(RCreate, "Resource\s", "", [{return, list}]), "\screated\n", "", [{return, list}]),
 
@@ -527,10 +578,11 @@ t_resources_cli(_Config) ->
     RShow2 = emqx_rule_engine_cli:resources(["show", ResId]),
     ?assertMatch({match, _}, re:run(RShow2, "Cannot found")),
     %ct:pal("RShow2 : ~p", [RShow2]),
+    unmock_print(),
     ok.
 
 t_resource_types_cli(_Config) ->
-    print_mock(),
+    mock_print(),
     RList = emqx_rule_engine_cli:resource_types(["list"]),
     ?assertMatch({match, _}, re:run(RList, "built_in")),
     %ct:pal("RList : ~p", [RList]),
@@ -538,6 +590,7 @@ t_resource_types_cli(_Config) ->
     RShow = emqx_rule_engine_cli:resource_types(["show", "inspect"]),
     ?assertMatch({match, _}, re:run(RShow, "inspect")),
     %ct:pal("RShow : ~p", [RShow]),
+    unmock_print(),
     ok.
 
 %%------------------------------------------------------------------------------
@@ -548,12 +601,20 @@ t_topic_func(_Config) ->
     %%TODO:
     ok.
 
+t_kv_store(_) ->
+    undefined = emqx_rule_funcs:kv_store_get(<<"abc">>),
+    <<"not_found">> = emqx_rule_funcs:kv_store_get(<<"abc">>, <<"not_found">>),
+    emqx_rule_funcs:kv_store_put(<<"abc">>, 1),
+    1 = emqx_rule_funcs:kv_store_get(<<"abc">>),
+    emqx_rule_funcs:kv_store_del(<<"abc">>),
+    undefined = emqx_rule_funcs:kv_store_get(<<"abc">>).
+
 %%------------------------------------------------------------------------------
 %% Test cases for rule registry
 %%------------------------------------------------------------------------------
 
 t_add_get_remove_rule(_Config) ->
-    print_mock(),
+    mock_print(),
     RuleId0 = <<"rule-debug-0">>,
     ok = emqx_rule_registry:add_rule(make_simple_rule(RuleId0)),
     ?assertMatch({ok, #rule{id = RuleId0}}, emqx_rule_registry:get_rule(RuleId0)),
@@ -566,9 +627,11 @@ t_add_get_remove_rule(_Config) ->
     ?assertMatch({ok, #rule{id = RuleId1}}, emqx_rule_registry:get_rule(RuleId1)),
     ok = emqx_rule_registry:remove_rule(Rule1),
     ?assertEqual(not_found, emqx_rule_registry:get_rule(RuleId1)),
+    unmock_print(),
     ok.
 
 t_add_get_remove_rules(_Config) ->
+    emqx_rule_registry:remove_rules(emqx_rule_registry:get_rules()),
     ok = emqx_rule_registry:add_rules(
             [make_simple_rule(<<"rule-debug-1">>),
              make_simple_rule(<<"rule-debug-2">>)]),
@@ -630,6 +693,48 @@ t_update_rule(_Config) ->
     ?assertEqual(not_found, emqx_rule_registry:get_rule(<<"an_existing_rule">>)),
     ok.
 
+t_disable_rule(_Config) ->
+    ets:new(simple_action_2, [named_table, set, public]),
+    ets:insert(simple_action_2, {created, 0}),
+    ets:insert(simple_action_2, {destroyed, 0}),
+    Now = erlang:timestamp(),
+    emqx_rule_registry:add_action(
+        #action{name = 'simple_action_2', app = ?APP,
+                module = ?MODULE,
+                on_create = simple_action_2_create,
+                on_destroy = simple_action_2_destroy,
+                types=[], params_spec = #{},
+                title = #{en => <<"Simple Action">>},
+                description = #{en => <<"Simple Action">>}}),
+    {ok, #rule{actions = [#action_instance{}]}} = emqx_rule_engine:create_rule(
+        #{id => <<"simple_rule_2">>,
+          rawsql => <<"select * from \"t/#\"">>,
+          actions => [#{name => 'simple_action_2', args => #{}}]
+        }),
+    [{_, CAt}] = ets:lookup(simple_action_2, created),
+    ?assert(CAt > Now),
+    [{_, DAt}] = ets:lookup(simple_action_2, destroyed),
+    ?assert(DAt < Now),
+
+    %% disable the rule and verify the old action instances has been cleared
+    Now2 = erlang:timestamp(),
+    emqx_rule_engine:update_rule(#{ id => <<"simple_rule_2">>,
+                                    enabled => false}),
+    [{_, CAt2}] = ets:lookup(simple_action_2, created),
+    ?assert(CAt2 < Now2),
+    [{_, DAt2}] = ets:lookup(simple_action_2, destroyed),
+    ?assert(DAt2 > Now2),
+
+    %% enable the rule again and verify the action instances has been created
+    Now3 = erlang:timestamp(),
+    emqx_rule_engine:update_rule(#{ id => <<"simple_rule_2">>,
+                                    enabled => true}),
+    [{_, CAt3}] = ets:lookup(simple_action_2, created),
+    ?assert(CAt3 > Now3),
+    [{_, DAt3}] = ets:lookup(simple_action_2, destroyed),
+    ?assert(DAt3 < Now3),
+    ok = emqx_rule_engine:delete_rule(<<"simple_rule_2">>).
+
 t_get_rules_for(_Config) ->
     Len0 = length(emqx_rule_registry:get_rules_for(<<"simple/topic">>)),
     ok = emqx_rule_registry:add_rules(
@@ -638,6 +743,19 @@ t_get_rules_for(_Config) ->
     ?assertEqual(Len0+2, length(emqx_rule_registry:get_rules_for(<<"simple/topic">>))),
     ok = emqx_rule_registry:remove_rules([<<"rule-debug-1">>, <<"rule-debug-2">>]),
     ok.
+
+t_get_rules_ordered_by_ts(_Config) ->
+    Now = fun() -> erlang:system_time(nanosecond) end,
+    ok = emqx_rule_registry:add_rules(
+            [make_simple_rule_with_ts(<<"rule-debug-0">>, Now()),
+             make_simple_rule_with_ts(<<"rule-debug-1">>, Now()),
+             make_simple_rule_with_ts(<<"rule-debug-2">>, Now())
+             ]),
+    ?assertMatch([
+        #rule{id = <<"rule-debug-0">>},
+        #rule{id = <<"rule-debug-1">>},
+        #rule{id = <<"rule-debug-2">>}
+    ], emqx_rule_registry:get_rules_ordered_by_ts()).
 
 t_get_rules_for_2(_Config) ->
     Len0 = length(emqx_rule_registry:get_rules_for(<<"simple/1">>)),
@@ -651,6 +769,39 @@ t_get_rules_for_2(_Config) ->
              ]),
     ?assertEqual(Len0+4, length(emqx_rule_registry:get_rules_for(<<"simple/1">>))),
     ok = emqx_rule_registry:remove_rules([<<"rule-debug-1">>, <<"rule-debug-2">>,<<"rule-debug-3">>, <<"rule-debug-4">>,<<"rule-debug-5">>, <<"rule-debug-6">>]),
+    ok.
+
+t_get_rules_with_same_event(_Config) ->
+    PubT = <<"simple/1">>,
+    PubN = length(emqx_rule_registry:get_rules_with_same_event(PubT)),
+    ?assertEqual([], emqx_rule_registry:get_rules_with_same_event(<<"$events/client_connected">>)),
+    ?assertEqual([], emqx_rule_registry:get_rules_with_same_event(<<"$events/client_disconnected">>)),
+    ?assertEqual([], emqx_rule_registry:get_rules_with_same_event(<<"$events/session_subscribed">>)),
+    ?assertEqual([], emqx_rule_registry:get_rules_with_same_event(<<"$events/session_unsubscribed">>)),
+    ?assertEqual([], emqx_rule_registry:get_rules_with_same_event(<<"$events/message_delivered">>)),
+    ?assertEqual([], emqx_rule_registry:get_rules_with_same_event(<<"$events/message_acked">>)),
+    ?assertEqual([], emqx_rule_registry:get_rules_with_same_event(<<"$events/message_dropped">>)),
+    ok = emqx_rule_registry:add_rules(
+            [make_simple_rule(<<"r1">>, <<"select * from \"simple/#\"">>, [<<"simple/#">>]),
+             make_simple_rule(<<"r2">>, <<"select * from \"abc/+\"">>, [<<"abc/+">>]),
+             make_simple_rule(<<"r3">>, <<"select * from \"$events/client_connected\"">>, [<<"$events/client_connected">>]),
+             make_simple_rule(<<"r4">>, <<"select * from \"$events/client_disconnected\"">>, [<<"$events/client_disconnected">>]),
+             make_simple_rule(<<"r5">>, <<"select * from \"$events/session_subscribed\"">>, [<<"$events/session_subscribed">>]),
+             make_simple_rule(<<"r6">>, <<"select * from \"$events/session_unsubscribed\"">>, [<<"$events/session_unsubscribed">>]),
+             make_simple_rule(<<"r7">>, <<"select * from \"$events/message_delivered\"">>, [<<"$events/message_delivered">>]),
+             make_simple_rule(<<"r8">>, <<"select * from \"$events/message_acked\"">>, [<<"$events/message_acked">>]),
+             make_simple_rule(<<"r9">>, <<"select * from \"$events/message_dropped\"">>, [<<"$events/message_dropped">>]),
+             make_simple_rule(<<"r10">>, <<"select * from \"t/1, $events/session_subscribed, $events/client_connected\"">>, [<<"t/1">>, <<"$events/session_subscribed">>, <<"$events/client_connected">>])
+             ]),
+    ?assertEqual(PubN + 3, length(emqx_rule_registry:get_rules_with_same_event(PubT))),
+    ?assertEqual(2, length(emqx_rule_registry:get_rules_with_same_event(<<"$events/client_connected">>))),
+    ?assertEqual(1, length(emqx_rule_registry:get_rules_with_same_event(<<"$events/client_disconnected">>))),
+    ?assertEqual(2, length(emqx_rule_registry:get_rules_with_same_event(<<"$events/session_subscribed">>))),
+    ?assertEqual(1, length(emqx_rule_registry:get_rules_with_same_event(<<"$events/session_unsubscribed">>))),
+    ?assertEqual(1, length(emqx_rule_registry:get_rules_with_same_event(<<"$events/message_delivered">>))),
+    ?assertEqual(1, length(emqx_rule_registry:get_rules_with_same_event(<<"$events/message_acked">>))),
+    ?assertEqual(1, length(emqx_rule_registry:get_rules_with_same_event(<<"$events/message_dropped">>))),
+    ok = emqx_rule_registry:remove_rules([<<"r1">>, <<"r2">>,<<"r3">>, <<"r4">>,<<"r5">>, <<"r6">>, <<"r7">>, <<"r8">>, <<"r9">>, <<"r10">>]),
     ok.
 
 t_add_get_remove_action(_Config) ->
@@ -729,11 +880,15 @@ get_resource_type() ->
     ?assertMatch({ok, #resource_type{name = <<"resource-type-debug-1">>}}, emqx_rule_registry:find_resource_type(<<"resource-type-debug-1">>)),
     ok.
 get_resource_types() ->
-    ?assert(length(emqx_rule_registry:get_resource_types()) > 0),
+    ResTypes = emqx_rule_registry:get_resource_types(),
+    ct:pal("resource types now: ~p", [ResTypes]),
+    ?assert(length(ResTypes) > 0),
     ok.
 unregister_resource_types_of() ->
+    NumOld = length(emqx_rule_registry:get_resource_types()),
     ok = emqx_rule_registry:unregister_resource_types_of(?APP),
-    ?assertEqual(0, length(emqx_rule_registry:get_resource_types())),
+    NumNow = length(emqx_rule_registry:get_resource_types()),
+    ?assert((NumOld - NumNow) >= 2),
     ok.
 
 %%------------------------------------------------------------------------------
@@ -804,6 +959,29 @@ message_dropped(Client) ->
     ok.
 message_acked(_Client) ->
     verify_event('message.acked'),
+    ok.
+
+t_mfa_action(_Config) ->
+    ok = emqx_rule_registry:add_action(
+            #action{name = 'mfa-action', app = ?APP,
+                    module = ?MODULE, on_create = mfa_action,
+                    types=[], params_spec = #{},
+                    title = #{en => <<"MFA callback action">>},
+                    description = #{en => <<"MFA callback action">>}}),
+    SQL = "SELECT * FROM \"t1\"",
+    {ok, #rule{id = Id}} = emqx_rule_engine:create_rule(
+                    #{id => <<"rule:t_mfa_action">>,
+                      rawsql => SQL,
+                      actions => [#{id => <<"action:mfa-test">>, name => 'mfa-action', args => #{}}],
+                      description => <<"Debug rule">>}),
+    {ok, Client} = emqtt:start_link([{username, <<"emqx">>}]),
+    {ok, _} = emqtt:connect(Client),
+    emqtt:publish(Client, <<"t1">>, <<"{\"id\": 1, \"name\": \"ha\"}">>, 0),
+    emqtt:stop(Client),
+    ct:sleep(500),
+    ?assertEqual(1, persistent_term:get(<<"action:mfa-test">>, 0)),
+    emqx_rule_registry:remove_rule(Id),
+    emqx_rule_registry:remove_action('mfa-action'),
     ok.
 
 t_match_atom_and_binary(_Config) ->
@@ -1240,6 +1418,44 @@ t_sqlselect_multi_actoins_3(Config) ->
                       on_action_failed => continue,
                       actions => [
                           #{name => 'crash_action', args => #{}, fallbacks =>[
+                              #{name => 'plus_by_one', args => #{}, fallbacks =>[]},
+                              #{name => 'plus_by_one', args => #{}, fallbacks =>[]}
+                          ]},
+                          #{name => 'republish',
+                            args => #{<<"target_topic">> => <<"t2">>,
+                                      <<"target_qos">> => -1,
+                                      <<"payload_tmpl">> => <<"clientid=${clientid}">>
+                                    },
+                            fallbacks => []}
+                      ]
+                     }),
+
+    (?config(conn_event, Config))(),
+    timer:sleep(100),
+
+    %% verfiy the fallback actions has been run
+    ?assertEqual(2, ets:lookup_element(plus_by_one_action, num, 2)),
+
+    %% verfiy the next actions can be run
+    receive {publish, #{topic := T, payload := Payload}} ->
+        ?assertEqual(<<"t2">>, T),
+        ?assertEqual(<<"clientid=c_emqx1">>, Payload)
+    after 1000 ->
+        ct:fail(wait_for_t2)
+    end,
+
+    emqx_rule_registry:remove_rule(Rule).
+
+t_sqlselect_multi_actoins_3_1(Config) ->
+    %% We create 2 actions in the same rule (on_action_failed = continue):
+    %% The first will fail (with a 'badact' return) and we need to make sure the
+    %% fallback actions can be executed, and the next actoins
+    %% will be run without influence
+    {ok, Rule} = emqx_rule_engine:create_rule(
+                    #{rawsql => ?config(connsql, Config),
+                      on_action_failed => continue,
+                      actions => [
+                          #{name => 'failure_action', args => #{}, fallbacks =>[
                               #{name => 'plus_by_one', args => #{}, fallbacks =>[]},
                               #{name => 'plus_by_one', args => #{}, fallbacks =>[]}
                           ]},
@@ -1819,7 +2035,7 @@ t_sqlparse_array_range_1(_Config) ->
     Sql02 = "select "
            "  payload.a[1..4] as c "
            "from \"t/#\" ",
-    ?assertThrow({select_and_transform_error,{{range_get,non_list_data},_}},
+    ?assertThrow({select_and_transform_error, {error,{range_get,non_list_data},_}},
         emqx_rule_sqltester:test(
             #{<<"rawsql">> => Sql02,
                 <<"ctx">> =>
@@ -1938,6 +2154,17 @@ t_sqlparse_payload_as(_Config) ->
         }
     }, Res02).
 
+t_sqlparse_nested_get(_Config) ->
+    Sql = "select payload as p, p.a.b as c "
+          "from \"t/#\" ",
+    ?assertMatch({ok,#{<<"c">> := 0}},
+        emqx_rule_sqltester:test(
+        #{<<"rawsql">> => Sql,
+          <<"ctx">> => #{
+              <<"topic">> => <<"t/1">>,
+              <<"payload">> => <<"{\"a\": {\"b\": 0}}">>
+          }})).
+
 %%------------------------------------------------------------------------------
 %% Internal helpers
 %%------------------------------------------------------------------------------
@@ -1950,6 +2177,17 @@ make_simple_rule(RuleId) when is_binary(RuleId) ->
           is_foreach = false,
           conditions = {},
           actions = [{'inspect', #{}}],
+          description = <<"simple rule">>}.
+
+make_simple_rule_with_ts(RuleId, Ts) when is_binary(RuleId) ->
+    #rule{id = RuleId,
+          rawsql = <<"select * from \"simple/topic\"">>,
+          for = [<<"simple/topic">>],
+          fields = [<<"*">>],
+          is_foreach = false,
+          conditions = {},
+          actions = [{'inspect', #{}}],
+          created_at = Ts,
           description = <<"simple rule">>}.
 
 make_simple_rule(RuleId, SQL, ForTopics) when is_binary(RuleId) ->
@@ -2016,11 +2254,33 @@ hook_metrics_action(_Id, _Params) ->
         ct:pal("applying hook_metrics_action: ~p", [Data]),
         ets:insert(events_record_tab, {EventName, Data})
     end.
+
+mfa_action(Id, _Params) ->
+    persistent_term:put(Id, 0),
+    {?MODULE, mfa_action_do, [Id]}.
+
+mfa_action_do(_Data, _Envs, K) ->
+    persistent_term:put(K, 1).
+
+failure_action(_Id, _Params) ->
+    fun(Data, _Envs) ->
+        ct:pal("applying crash action, Data: ~p", [Data]),
+        {badact, intentional_failure}
+    end.
+
 crash_action(_Id, _Params) ->
     fun(Data, _Envs) ->
         ct:pal("applying crash action, Data: ~p", [Data]),
-        1/0
+        error(crash)
     end.
+
+simple_action_2_create(_Id, _Params) ->
+    ets:insert(simple_action_2, {created, erlang:timestamp()}),
+    fun(_Data, _Envs) -> ok end.
+
+simple_action_2_destroy(_Id, _Params) ->
+    ets:insert(simple_action_2, {destroyed, erlang:timestamp()}),
+    fun(_Data, _Envs) -> ok end.
 
 init_plus_by_one_action() ->
     ets:new(plus_by_one_action, [named_table, set, public]),
@@ -2339,12 +2599,16 @@ set_special_configs(emqx_rule_engine) ->
 set_special_configs(_App) ->
     ok.
 
-print_mock() ->
+mock_print() ->
+    catch meck:unload(emqx_ctl),
     meck:new(emqx_ctl, [non_strict, passthrough]),
     meck:expect(emqx_ctl, print, fun(Arg) -> emqx_ctl:format(Arg) end),
     meck:expect(emqx_ctl, print, fun(Msg, Arg) -> emqx_ctl:format(Msg, Arg) end),
     meck:expect(emqx_ctl, usage, fun(Usages) -> emqx_ctl:format_usage(Usages) end),
     meck:expect(emqx_ctl, usage, fun(Cmd, Descr) -> emqx_ctl:format_usage(Cmd, Descr) end).
+
+unmock_print() ->
+    meck:unload(emqx_ctl).
 
 t_load_providers(_) ->
     error('TODO').

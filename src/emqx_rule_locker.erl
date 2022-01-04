@@ -14,15 +14,21 @@
 %% limitations under the License.
 %%--------------------------------------------------------------------
 
--module(emqx_rule_id_SUITE).
+-module(emqx_rule_locker).
 
--compile(export_all).
--compile(nowarn_export_all).
+-export([start_link/0]).
 
--include_lib("eunit/include/eunit.hrl").
+-export([ lock/1
+        , unlock/1
+        ]).
 
-all() -> emqx_ct:all(?MODULE).
+start_link() ->
+    ekka_locker:start_link(?MODULE).
 
-t_gen(_) ->
-    ?assertEqual(10, length(emqx_rule_id:gen(10))),
-    ?assertEqual(20, length(emqx_rule_id:gen(20))).
+-spec(lock(binary()) -> ekka_locker:lock_result()).
+lock(Id) ->
+    ekka_locker:acquire(?MODULE, Id, local).
+
+-spec(unlock(binary()) -> {boolean(), [node()]}).
+unlock(Id) ->
+    ekka_locker:release(?MODULE, Id, local).
