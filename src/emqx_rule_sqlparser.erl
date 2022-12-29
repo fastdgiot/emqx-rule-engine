@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -47,10 +47,6 @@
                | {'fun', atom(), list(field())}).
 
 -export_type([select/0]).
-
-%% Dialyzer gives up on the generated code.
-%% probably due to stack depth, or inlines.
--dialyzer({nowarn_function, [parse_select/1]}).
 
 %% Parse one select statement.
 -spec(parse_select(string() | binary())
@@ -105,4 +101,3 @@ select_from(#select{from = From}) ->
 -spec(select_where(select()) -> tuple()).
 select_where(#select{where = Where}) ->
     Where.
-

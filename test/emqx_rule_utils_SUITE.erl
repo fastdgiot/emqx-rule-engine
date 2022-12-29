@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -134,3 +134,24 @@ t_preproc_sql5(_) ->
     ParamsTokens = emqx_rule_utils:preproc_tmpl(<<"a:${a},b:${b},c:${c},d:${d}">>),
     ?assertEqual(<<"a:'1''''2',b:1,c:1.0,d:'{\"d1\":\"someone''s phone\"}'">>,
                  emqx_rule_utils:proc_cql_param_str(ParamsTokens, Selected)).
+
+t_if_contains_placeholder(_) ->
+    TestTab =
+        [ {true, "${a}"}
+        , {true, "${a}${b}"}
+        , {true, "${a},${b},${c}"}
+        , {true, "a:${a}"}
+        , {true, "a:${a},b:${b}"}
+        , {true, "abc${ab}"}
+        , {true, "a${ab${c}${e"}
+        , {false, "a"}
+        , {false, "abc$"}
+        , {false, "abc${"}
+        , {false, "abc${a"}
+        , {false, "abc${ab"}
+        , {false, "a${ab${c${e"}
+        ],
+    lists:foreach(fun({Expected, InputStr}) ->
+            ?assert(Expected =:= emqx_rule_utils:if_contains_placeholder(InputStr)),
+            ?assert(Expected =:= emqx_rule_utils:if_contains_placeholder(iolist_to_binary(InputStr)))
+        end, TestTab).

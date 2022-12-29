@@ -14,24 +14,16 @@
 %% limitations under the License.
 %%--------------------------------------------------------------------
 
--module(emqx_rule_engine_app).
+%% Test Suite funcs
+-import(emqx_rule_test_lib,
+        [ stop_apps/0
+        , start_apps/0
+        ]).
 
--behaviour(application).
-
--emqx_plugin(?MODULE).
-
--export([start/2]).
-
--export([stop/1]).
-
-start(_Type, _Args) ->
-    {ok, Sup} = emqx_rule_engine_sup:start_link(),
-    _ = emqx_rule_engine_sup:start_locker(),
-    ok = emqx_rule_engine:load_providers(),
-    ok = emqx_rule_monitor:async_refresh_resources_rules(),
-    ok = emqx_rule_engine_cli:load(),
-    {ok, Sup}.
-
-stop(_State) ->
-    ok = emqx_rule_events:unload(),
-    ok = emqx_rule_engine_cli:unload().
+%% RULE helper funcs
+-import(emqx_rule_test_lib,
+        [ create_simple_repub_rule/2
+        , create_simple_repub_rule/3
+        , make_simple_debug_resource_type/0
+        , init_events_counters/0
+        ]).

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -16,6 +16,12 @@
 
 -module(emqx_rule_utils).
 
+-include("rule_engine.hrl").
+-include_lib("emqx/include/logger.hrl").
+
+-export([ replace_var/2
+        ]).
+
 %% preprocess and process tempalte string with place holders
 -export([ preproc_tmpl/1
         , proc_tmpl/2
@@ -28,10 +34,12 @@
         , proc_sql/2
         , proc_sql_param_str/2
         , proc_cql_param_str/2
+        , if_contains_placeholder/1
         ]).
 
 %% type converting
 -export([ str/1
+        , float2str/2
         , bin/1
         , bool/1
         , int/1
@@ -55,13 +63,17 @@
         , can_topic_match_oneof/2
         ]).
 
+-export([ add_metadata/2
+        , log_action/4
+        ]).
+
 -compile({no_auto_import,
           [ float/1
           ]}).
 
 -define(EX_PLACE_HOLDER, "(\\$\\{[a-zA-Z0-9\\._]+\\})").
-
 -define(EX_WITHE_CHARS, "\\s"). %% Space and CRLF
+-define(FLOAT_PRECISION, 17).
 
 -type(uri_string() :: iodata()).
 
@@ -85,6 +97,14 @@ preproc_tmpl([[Str, Phld]| Tokens], Acc) ->
             put_head(str, Str, Acc)));
 preproc_tmpl([[Str]| Tokens], Acc) ->
     preproc_tmpl(Tokens, put_head(str, Str, Acc)).
+
+%% Replace a simple var to its value. For example, given "${var}", if the var=1, then the result
+%% value will be an integer 1.
+replace_var(Tokens, Data) when is_list(Tokens) ->
+    [Val] = proc_tmpl(Tokens, Data, #{return => rawlist}),
+    Val;
+replace_var(Val, _Data) ->
+    Val.
 
 put_head(_Type, <<>>, List) -> List;
 put_head(Type, Term, List) ->
@@ -155,6 +175,14 @@ proc_cql_param_str(Tokens, Data) ->
 proc_param_str(Tokens, Data, Quote) ->
     iolist_to_binary(
       proc_tmpl(Tokens, Data, #{return => rawlist, var_trans => Quote})).
+
+%% return true if the Str contains any placeholder in "${var}" format.
+-spec(if_contains_placeholder(string() | binary()) -> boolean()).
+if_contains_placeholder(Str) ->
+    case re:split(Str, ?EX_PLACE_HOLDER, [{return, list}, group, trim]) of
+        [[_]] -> false;
+        _ -> true
+    end.
 
 %% backward compatibility for hot upgrading from =< e4.2.1
 get_phld_var(Fun, Data) when is_function(Fun) ->
@@ -265,6 +293,9 @@ str(List) when is_list(List) ->
     end;
 str(Data) -> error({invalid_str, Data}).
 
+float2str(Float, Precision) when is_float(Float) and is_integer(Precision)->
+    float_to_binary(Float, [{decimals, Precision}, compact]).
+
 utf8_bin(Str) when is_binary(Str); is_list(Str) ->
     unicode:characters_to_binary(Str);
 utf8_bin(Str) ->
@@ -336,12 +367,12 @@ bool(Bool) -> error({invalid_boolean, Bool}).
 number_to_binary(Int) when is_integer(Int) ->
     integer_to_binary(Int);
 number_to_binary(Float) when is_float(Float) ->
-    float_to_binary(Float, [{decimals, 10}, compact]).
+    float_to_binary(Float, [{decimals, ?FLOAT_PRECISION}, compact]).
 
 number_to_list(Int) when is_integer(Int) ->
     integer_to_list(Int);
 number_to_list(Float) when is_float(Float) ->
-    float_to_list(Float, [{decimals, 10}, compact]).
+    float_to_list(Float, [{decimals, ?FLOAT_PRECISION}, compact]).
 
 parse_nested(Attr) ->
     case string:split(Attr, <<".">>, all) of
@@ -356,3 +387,30 @@ can_topic_match_oneof(Topic, Filters) ->
     lists:any(fun(Fltr) ->
         emqx_topic:match(Topic, Fltr)
     end, Filters).
+
+add_metadata(Envs, Metadata) when is_map(Envs), is_map(Metadata) ->
+    NMetadata = maps:merge(maps:get(metadata, Envs, #{}), Metadata),
+    Envs#{metadata => NMetadata};
+add_metadata(Envs, Action) when is_map(Envs), is_record(Action, action_instance)->
+    Metadata = gen_metadata_from_action(Action),
+    NMetadata = maps:merge(maps:get(metadata, Envs, #{}), Metadata),
+    Envs#{metadata => NMetadata}.
+
+gen_metadata_from_action(#action_instance{name = Name, args = undefined}) ->
+    #{action_name => Name, resource_id => undefined};
+gen_metadata_from_action(#action_instance{name = Name, args = Args})
+  when is_map(Args) ->
+    #{action_name => Name, resource_id => maps:get(<<"$resource">>, Args, undefined)};
+gen_metadata_from_action(#action_instance{name = Name}) ->
+    #{action_name => Name, resource_id => undefined}.
+
+log_action(Level, Metadata, Fmt, Args) ->
+    ?LOG(Level,
+         "Rule: ~p; Action: ~p; Resource: ~p. " ++ Fmt,
+         metadata_values(Metadata) ++ Args).
+
+metadata_values(Metadata) ->
+    RuleId = maps:get(rule_id, Metadata, undefined),
+    ActionName = maps:get(action_name, Metadata, undefined),
+    ResourceName = maps:get(resource_id, Metadata, undefined),
+    [RuleId, ActionName, ResourceName].

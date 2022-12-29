@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -96,7 +96,6 @@ unload() ->
 %%-----------------------------------------------------------------------------
 %% 'rules' command
 %%-----------------------------------------------------------------------------
--dialyzer([{nowarn_function, [rules/1]}]).
 rules(["list"]) ->
     print_all(emqx_rule_registry:get_rules_ordered_by_ts());
 
@@ -273,10 +272,13 @@ format(#resource{id = Id,
                  config = Config,
                  description = Descr}) ->
     Status =
-        [begin
-            {ok, St} = rpc:call(Node, emqx_rule_engine, get_resource_status, [Id]),
-            maps:put(node, Node, St)
-        end || Node <- [node()| nodes()]],
+        lists:concat(
+          [ case rpc:call(Node, emqx_rule_engine, get_resource_status, [Id]) of
+                {badrpc, _} -> [];
+                {ok, St} -> [maps:put(node, Node, St)];
+                {error, _} -> [maps:put(node, Node, #{is_alive => false})]
+            end
+            || Node <- ekka_mnesia:running_nodes()]),
     lists:flatten(io_lib:format("resource(id='~s', type='~s', config=~0p, status=~0p, description='~s')~n", [Id, Type, Config, Status, Descr]));
 
 format(#resource_type{name = Name,
@@ -369,12 +371,20 @@ get_actions() ->
     emqx_rule_registry:get_actions().
 
 get_rule_metrics(Id) ->
-    [maps:put(node, Node, rpc:call(Node, emqx_rule_metrics, get_rule_metrics, [Id]))
-     || Node <- [node()| nodes()]].
+    lists:concat(
+      [ case rpc:call(Node, emqx_rule_metrics, get_rule_metrics, [Id]) of
+            {badrpc, _} -> [];
+            Res -> [maps:put(node, Node, Res)]
+        end
+      || Node <- ekka_mnesia:running_nodes()]).
 
 get_action_metrics(Id) ->
-    [maps:put(node, Node, rpc:call(Node, emqx_rule_metrics, get_action_metrics, [Id]))
-     || Node <- [node()| nodes()]].
+    lists:concat(
+      [ case rpc:call(Node, emqx_rule_metrics, get_action_metrics, [Id]) of
+            {badrpc, _} -> [];
+            Res -> [maps:put(node, Node, Res)]
+        end
+        || Node <- ekka_mnesia:running_nodes()]).
 
 on_failed(continue) -> continue;
 on_failed(stop) -> stop;

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -61,28 +61,49 @@
         }).
 
 -record(action_instance,
-        { id :: action_instance_id()
-        , name :: action_name()
-        , fallbacks :: list(#action_instance{})
-        , args :: #{binary() => term()} %% the args got from API for initializing action_instance
+        { id
+        , name
+        , fallbacks
+        , args %% the args got from API for initializing action_instance
         }).
+-type(action_instance()
+      :: #action_instance{ id :: action_instance_id()
+                         , name :: action_name()
+                         , fallbacks :: list(#action_instance{})
+                         , args :: #{binary() => term()} %% the args got from API for initializing action_instance
+                         }).
 
 -record(rule,
-        { id :: rule_id()
-        , for :: list(topic())
-        , rawsql :: binary()
-        , is_foreach :: boolean()
-        , fields :: list()
-        , doeach :: term()
-        , incase :: list()
-        , conditions :: tuple()
-        , on_action_failed :: continue | stop
-        , actions :: list(#action_instance{})
-        , enabled :: boolean()
-        , created_at :: integer() %% epoch in millisecond precision
-        , description :: binary()
-        , state = normal :: atom()
+        { id
+        , for
+        , rawsql
+        , is_foreach
+        , fields
+        , doeach
+        , incase
+        , conditions
+        , on_action_failed
+        , actions
+        , enabled
+        , created_at %% epoch in millisecond precision
+        , description
+        , state = normal
         }).
+-type(rule() :: #rule{ id :: rule_id()
+                     , for :: list(topic())
+                     , rawsql :: binary()
+                     , is_foreach :: boolean()
+                     , fields :: list()
+                     , doeach :: term()
+                     , incase :: list()
+                     , conditions :: tuple()
+                     , on_action_failed :: continue | stop
+                     , actions :: list(#action_instance{})
+                     , enabled :: boolean()
+                     , created_at :: integer() %% epoch in millisecond precision
+                     , description :: binary()
+                     , state :: normal | atom()
+                     }).
 
 -record(resource,
         { id :: resource_id()
@@ -110,7 +131,7 @@
 
 -record(resource_params,
         { id :: resource_id()
-        , params :: #{} %% the params got after initializing the resource
+        , params :: map() %% the params got after initializing the resource
         , status = #{is_alive => false} :: #{is_alive := boolean(), atom() => term()}
         }).
 
@@ -155,10 +176,12 @@
             end
         end()).
 
+-define(RPC_TIMEOUT, 30000).
+
 -define(CLUSTER_CALL(Func, Args), ?CLUSTER_CALL(Func, Args, ok)).
 
 -define(CLUSTER_CALL(Func, Args, ResParttern),
-    fun() -> case rpc:multicall(ekka_mnesia:running_nodes(), ?MODULE, Func, Args, 30000) of
+    fun() -> case rpc:multicall(ekka_mnesia:running_nodes(), ?MODULE, Func, Args, ?RPC_TIMEOUT) of
         {ResL, []} ->
             case lists:filter(fun(ResParttern) -> false; (_) -> true end, ResL) of
                 [] -> ResL;
@@ -170,6 +193,37 @@
             ?LOG(error, "cluster_call bad nodes found: ~p, ResL: ~p", [BadNodes, ResL]),
             throw({Func, {failed_on_nodes, BadNodes}})
    end end()).
+
+%% like CLUSTER_CALL/3, but recall the remote node using FallbackFunc if Func is undefined
+-define(CLUSTER_CALL(Func, Args, ResParttern, FallbackFunc, FallbackArgs),
+    fun() ->
+        RNodes = ekka_mnesia:running_nodes(),
+        ResL = erpc:multicall(RNodes, ?MODULE, Func, Args, ?RPC_TIMEOUT),
+        Res = lists:zip(RNodes, ResL),
+        BadRes = lists:filtermap(fun
+            ({_Node, {ok, ResParttern}}) ->
+                false;
+            ({Node, {error, {exception, undef, _}}}) ->
+                try erpc:call(Node, ?MODULE, FallbackFunc, FallbackArgs, ?RPC_TIMEOUT) of
+                    ResParttern ->
+                        false;
+                    OtherRes ->
+                        {true, #{rpc_type => call, func => FallbackFunc,
+                                 result => OtherRes, node => Node}}
+                catch
+                    Err:Reason ->
+                        {true, #{rpc_type => call, func => FallbackFunc,
+                                 exception => {Err, Reason}, node => Node}}
+                end;
+            ({Node, OtherRes}) ->
+                {true, #{rpc_type => multicall, func => FallbackFunc,
+                         result => OtherRes, node => Node}}
+        end, Res),
+        case BadRes of
+            [] -> Res;
+            _ -> throw(BadRes)
+        end
+    end()).
 
 %% Tables
 -define(RULE_TAB, emqx_rule).

@@ -1,4 +1,4 @@
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -19,16 +19,6 @@
 
 -export([ test/1
         ]).
-
-%% Dialyzer gives up on the generated code.
-%% probably due to stack depth, or inlines.
--dialyzer({nowarn_function, [test/1,
-                             test_rule/4,
-                             flatten/1,
-                             sql_test_action/0,
-                             fill_default_values/2,
-                             envs_examp/1
-                             ]}).
 
 -spec(test(#{}) -> {ok, map() | list()} | {error, term()}).
 test(#{<<"rawsql">> := Sql, <<"ctx">> := Context}) ->
@@ -77,7 +67,7 @@ test_rule(Sql, Select, Context, EventTopics) ->
         R
     of
         {ok, Data} -> {ok, flatten(Data)};
-        {error, nomatch} -> {error, nomatch}
+        {error, Reason} -> {error, Reason}
     after
         ok = emqx_rule_registry:remove_action_instance_params(ActInstId)
     end.
@@ -98,21 +88,8 @@ sql_test_action() ->
 fill_default_values(Event, Context) ->
     maps:merge(envs_examp(Event), Context).
 
-envs_examp(<<"$events/", _/binary>> = EVENT_TOPIC) ->
+envs_examp(EVENT_TOPIC) ->
     EventName = emqx_rule_events:event_name(EVENT_TOPIC),
     emqx_rule_maps:atom_key_map(
         maps:from_list(
-            emqx_rule_events:columns_with_exam(EventName)));
-envs_examp(_) ->
-    #{id => emqx_guid:to_hexstr(emqx_guid:gen()),
-      clientid => <<"c_emqx">>,
-      username => <<"u_emqx">>,
-      payload => <<"{\"id\": 1, \"name\": \"ha\"}">>,
-      peerhost => <<"127.0.0.1">>,
-      topic => <<"t/a">>,
-      qos => 1,
-      flags => #{sys => true, event => true},
-      publish_received_at => emqx_rule_utils:now_ms(),
-      timestamp => emqx_rule_utils:now_ms(),
-      node => node()
-    }.
+            emqx_rule_events:columns_with_exam(EventName))).

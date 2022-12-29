@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -44,6 +44,7 @@ groups() ->
 
 init_per_suite(Config) ->
     emqx_ct_helpers:start_apps([emqx]),
+    catch emqx_rule_metrics:stop(),
     {ok, _} = emqx_rule_metrics:start_link(),
     Config.
 
@@ -55,7 +56,6 @@ end_per_suite(_Config) ->
 init_per_testcase(_, Config) ->
     catch emqx_rule_metrics:stop(),
     {ok, _} = emqx_rule_metrics:start_link(),
-    [emqx_metrics:set(M, 0) || M <- emqx_rule_metrics:overall_metrics()],
     Config.
 
 end_per_testcase(_, _Config) ->
@@ -81,8 +81,6 @@ t_action(_) ->
     ?assertEqual(1, emqx_rule_metrics:get_actions_exception(<<"action:1">>)),
     ?assertEqual(2, emqx_rule_metrics:get_actions_taken(<<"action:2">>)),
     ?assertEqual(0, emqx_rule_metrics:get_actions_taken(<<"action:3">>)),
-    ?assertEqual(3, emqx_rule_metrics:get_overall('actions.taken')),
-    ?assertEqual(1, emqx_rule_metrics:get_overall('actions.exception')),
     ok = emqx_rule_metrics:clear_metrics(<<"action:1">>),
     ok = emqx_rule_metrics:clear_metrics(<<"action:2">>),
     ?assertEqual(0, emqx_rule_metrics:get_actions_taken(<<"action:1">>)),
@@ -92,12 +90,19 @@ t_rule(_) ->
     ok = emqx_rule_metrics:create_rule_metrics(<<"rule:1">>),
     ok = emqx_rule_metrics:create_rule_metrics(<<"rule2">>),
     ok = emqx_rule_metrics:inc(<<"rule:1">>, 'rules.matched'),
+    ok = emqx_rule_metrics:inc(<<"rule:1">>, 'rules.passed'),
+    ok = emqx_rule_metrics:inc(<<"rule:1">>, 'rules.exception'),
+    ok = emqx_rule_metrics:inc(<<"rule:1">>, 'rules.no_result'),
+    ok = emqx_rule_metrics:inc(<<"rule:1">>, 'rules.failed'),
     ok = emqx_rule_metrics:inc(<<"rule2">>, 'rules.matched'),
     ok = emqx_rule_metrics:inc(<<"rule2">>, 'rules.matched'),
     ?assertEqual(1, emqx_rule_metrics:get(<<"rule:1">>, 'rules.matched')),
+    ?assertEqual(1, emqx_rule_metrics:get(<<"rule:1">>, 'rules.passed')),
+    ?assertEqual(1, emqx_rule_metrics:get(<<"rule:1">>, 'rules.exception')),
+    ?assertEqual(1, emqx_rule_metrics:get(<<"rule:1">>, 'rules.no_result')),
+    ?assertEqual(1, emqx_rule_metrics:get(<<"rule:1">>, 'rules.failed')),
     ?assertEqual(2, emqx_rule_metrics:get(<<"rule2">>, 'rules.matched')),
     ?assertEqual(0, emqx_rule_metrics:get(<<"rule3">>, 'rules.matched')),
-    ?assertEqual(3, emqx_rule_metrics:get_overall('rules.matched')),
     ok = emqx_rule_metrics:clear_rule_metrics(<<"rule:1">>),
     ok = emqx_rule_metrics:clear_rule_metrics(<<"rule2">>).
 
@@ -119,24 +124,11 @@ rule_speed(_) ->
     ?LET(#{max := Max, current := Current}, emqx_rule_metrics:get_rule_speed(<<"rule1">>),
          {?assert(Max =< 2),
           ?assert(Current =< 2)}),
-    ct:pal("===== Speed: ~p~n", [emqx_rule_metrics:get_overall_rule_speed()]),
-    ?LET(#{max := Max, current := Current}, emqx_rule_metrics:get_overall_rule_speed(),
-         {?assert(Max =< 3),
-          ?assert(Current =< 3)}),
     ct:sleep(2100),
     ?LET(#{max := Max, current := Current, last5m := Last5Min}, emqx_rule_metrics:get_rule_speed(<<"rule1">>),
          {?assert(Max =< 2),
           ?assert(Current == 0),
           ?assert(Last5Min =< 0.67)}),
-    ?LET(#{max := Max, current := Current, last5m := Last5Min}, emqx_rule_metrics:get_overall_rule_speed(),
-         {?assert(Max =< 3),
-          ?assert(Current == 0),
-          ?assert(Last5Min =< 1)}),
-    ct:sleep(3000),
-    ?LET(#{max := Max, current := Current, last5m := Last5Min}, emqx_rule_metrics:get_overall_rule_speed(),
-         {?assert(Max =< 3),
-          ?assert(Current == 0),
-          ?assert(Last5Min == 0)}),
     ok = emqx_rule_metrics:clear_rule_metrics(<<"rule1">>),
     ok = emqx_rule_metrics:clear_rule_metrics(<<"rule:2">>).
 
@@ -146,14 +138,10 @@ rule_speed(_) ->
 % t_get(_) ->
 %     error('TODO').
 
-% t_get_overall(_) ->
-%     error('TODO').
 
 % t_get_rule_speed(_) ->
 %     error('TODO').
 
-% t_get_overall_rule_speed(_) ->
-%     error('TODO').
 
 % t_get_rule_metrics(_) ->
 %     error('TODO').
@@ -163,7 +151,3 @@ rule_speed(_) ->
 
 % t_inc(_) ->
 %     error('TODO').
-
-% t_overall_metrics(_) ->
-%     error('TODO').
-

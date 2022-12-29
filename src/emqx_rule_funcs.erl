@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -17,6 +17,9 @@
 -module(emqx_rule_funcs).
 
 -include("rule_engine.hrl").
+-elvis([{elvis_style, god_modules, disable}]).
+-elvis([{elvis_style, function_naming_convention, disable}]).
+-elvis([{elvis_style, macro_names, disable}]).
 
 %% IoT Funcs
 -export([ msgid/0
@@ -93,6 +96,7 @@
         , bool/1
         , int/1
         , float/1
+        , float2str/2
         , map/1
         , bin2hexstr/1
         , hexstr2bin/1
@@ -169,6 +173,21 @@
         , sha256/1
         ]).
 
+%% gzip Funcs
+-export([ gzip/1
+        , gunzip/1
+        ]).
+
+%% zip Funcs
+-export([ zip/1
+        , unzip/1
+        ]).
+
+%% compressed Funcs
+-export([ zip_compress/1
+        , zip_uncompress/1
+        ]).
+
 %% Data encode and decode
 -export([ base64_encode/1
         , base64_decode/1
@@ -183,10 +202,18 @@
         , now_rfc3339/1
         , unix_ts_to_rfc3339/1
         , unix_ts_to_rfc3339/2
+        , format_date/3
+        , format_date/4
+        , timezone_to_second/1
+        , date_to_unix_ts/3
+        , date_to_unix_ts/4
         , rfc3339_to_unix_ts/1
         , rfc3339_to_unix_ts/2
         , now_timestamp/0
         , now_timestamp/1
+        , mongo_date/0
+        , mongo_date/1
+        , mongo_date/2
         ]).
 
 %% Proc Dict Func
@@ -308,28 +335,46 @@ null() ->
 %% Arithmetic Funcs
 %%------------------------------------------------------------------------------
 
+-define(OPERATOR_TYPE_ERROR, unsupported_function_operator_type).
+
 %% plus 2 numbers
 '+'(X, Y) when is_number(X), is_number(Y) ->
     X + Y;
-
 %% concat 2 strings
 '+'(X, Y) when is_binary(X), is_binary(Y) ->
-    concat(X, Y).
+    concat(X, Y);
+%% unsupported type implicit conversion
+'+'(X, Y)
+  when (is_number(X) andalso is_binary(Y)) orelse
+       (is_binary(X) andalso is_number(Y)) ->
+    error(unsupported_type_implicit_conversion);
+'+'(_, _) ->
+    error(?OPERATOR_TYPE_ERROR).
 
 '-'(X, Y) when is_number(X), is_number(Y) ->
-    X - Y.
+    X - Y;
+'-'(_, _) ->
+    error(?OPERATOR_TYPE_ERROR).
 
 '*'(X, Y) when is_number(X), is_number(Y) ->
-    X * Y.
+    X * Y;
+'*'(_, _) ->
+    error(?OPERATOR_TYPE_ERROR).
 
 '/'(X, Y) when is_number(X), is_number(Y) ->
-    X / Y.
+    X / Y;
+'/'(_, _) ->
+    error(?OPERATOR_TYPE_ERROR).
 
 'div'(X, Y) when is_integer(X), is_integer(Y) ->
-    X div Y.
+    X div Y;
+'div'(_, _) ->
+    error(?OPERATOR_TYPE_ERROR).
 
 mod(X, Y) when is_integer(X), is_integer(Y) ->
-    X rem Y.
+    X rem Y;
+mod(_, _) ->
+    error(?OPERATOR_TYPE_ERROR).
 
 eq(X, Y) ->
     X == Y.
@@ -438,7 +483,8 @@ subbits(Bits, Len) when is_integer(Len), is_bitstring(Bits) ->
 subbits(Bits, Start, Len) when is_integer(Start), is_integer(Len), is_bitstring(Bits) ->
     get_subbits(Bits, Start, Len, <<"integer">>, <<"unsigned">>, <<"big">>).
 
-subbits(Bits, Start, Len, Type, Signedness, Endianness) when is_integer(Start), is_integer(Len), is_bitstring(Bits) ->
+subbits(Bits, Start, Len, Type, Signedness, Endianness)
+    when is_integer(Start), is_integer(Len), is_bitstring(Bits) ->
     get_subbits(Bits, Start, Len, Type, Signedness, Endianness).
 
 get_subbits(Bits, Start, Len, Type, Signedness, Endianness) ->
@@ -516,11 +562,14 @@ int(Data) ->
 float(Data) ->
     emqx_rule_utils:float(Data).
 
+float2str(Float, Precision) ->
+    emqx_rule_utils:float2str(Float, Precision).
+
 map(Data) ->
     emqx_rule_utils:map(Data).
 
 bin2hexstr(Bin) when is_binary(Bin) ->
-    emqx_misc:bin2hexstr_A_F(Bin).
+    emqx_misc:bin2hexstr_a_f_upper(Bin).
 
 hexstr2bin(Str) when is_binary(Str) ->
     emqx_misc:hexstr2bin(Str).
@@ -608,7 +657,8 @@ tokens(S, Separators) ->
     [list_to_binary(R) || R <- string:lexemes(binary_to_list(S), binary_to_list(Separators))].
 
 tokens(S, Separators, <<"nocrlf">>) ->
-    [list_to_binary(R) || R <- string:lexemes(binary_to_list(S), binary_to_list(Separators) ++ [$\r,$\n,[$\r,$\n]])].
+    [list_to_binary(R) || R <- string:lexemes(binary_to_list(S),
+        binary_to_list(Separators) ++ [$\r,$\n,[$\r,$\n]])].
 
 concat(S1, S2) when is_binary(S1), is_binary(S2) ->
     unicode:characters_to_binary([S1, S2], unicode).
@@ -646,7 +696,8 @@ replace(SrcStr, P, RepStr) when is_binary(SrcStr), is_binary(P), is_binary(RepSt
 replace(SrcStr, P, RepStr, <<"all">>) when is_binary(SrcStr), is_binary(P), is_binary(RepStr) ->
     iolist_to_binary(string:replace(SrcStr, P, RepStr, all));
 
-replace(SrcStr, P, RepStr, <<"trailing">>) when is_binary(SrcStr), is_binary(P), is_binary(RepStr) ->
+replace(SrcStr, P, RepStr, <<"trailing">>)
+          when is_binary(SrcStr), is_binary(P), is_binary(RepStr) ->
     iolist_to_binary(string:replace(SrcStr, P, RepStr, trailing));
 
 replace(SrcStr, P, RepStr, <<"leading">>) when is_binary(SrcStr), is_binary(P), is_binary(RepStr) ->
@@ -662,7 +713,7 @@ regex_replace(SrcStr, RE, RepStr) ->
     re:replace(SrcStr, RE, RepStr, [global, {return,binary}]).
 
 ascii(Char) when is_binary(Char) ->
-    [FirstC| _] = binary_to_list(Char),
+    [FirstC | _] = binary_to_list(Char),
     FirstC.
 
 find(S, P) when is_binary(S), is_binary(P) ->
@@ -782,7 +833,37 @@ sha256(S) when is_binary(S) ->
     hash(sha256, S).
 
 hash(Type, Data) ->
-    emqx_misc:bin2hexstr_a_f(crypto:hash(Type, Data)).
+    emqx_misc:bin2hexstr_a_f_lower(crypto:hash(Type, Data)).
+
+%%------------------------------------------------------------------------------
+%% gzip Funcs
+%%------------------------------------------------------------------------------
+
+gzip(S) when is_binary(S) ->
+    zlib:gzip(S).
+
+gunzip(S) when is_binary(S) ->
+    zlib:gunzip(S).
+
+%%------------------------------------------------------------------------------
+%% zip Funcs
+%%------------------------------------------------------------------------------
+
+zip(S) when is_binary(S) ->
+    zlib:zip(S).
+
+unzip(S) when is_binary(S) ->
+    zlib:unzip(S).
+
+%%------------------------------------------------------------------------------
+%% zip_compress Funcs
+%%------------------------------------------------------------------------------
+
+zip_compress(S) when is_binary(S) ->
+    zlib:compress(S).
+
+zip_uncompress(S) when is_binary(S) ->
+    zlib:uncompress(S).
 
 %%------------------------------------------------------------------------------
 %% Data encode and decode Funcs
@@ -868,30 +949,78 @@ now_timestamp(Unit) ->
 time_unit(<<"second">>) -> second;
 time_unit(<<"millisecond">>) -> millisecond;
 time_unit(<<"microsecond">>) -> microsecond;
-time_unit(<<"nanosecond">>) -> nanosecond.
+time_unit(<<"nanosecond">>) -> nanosecond;
+time_unit(second) -> second;
+time_unit(millisecond) -> millisecond;
+time_unit(microsecond) -> microsecond;
+time_unit(nanosecond) -> nanosecond.
+
+format_date(TimeUnit, Offset, FormatString) ->
+    Unit = time_unit(TimeUnit),
+    TimeEpoch = erlang:system_time(Unit),
+    format_date(Unit, Offset, FormatString, TimeEpoch).
+
+timezone_to_second(TimeZone) ->
+    emqx_calendar:offset_second(TimeZone).
+
+format_date(TimeUnit, Offset, FormatString, TimeEpoch) ->
+    Unit = time_unit(TimeUnit),
+    emqx_rule_utils:bin(
+        lists:concat(
+            emqx_calendar:format(TimeEpoch, Unit, Offset, FormatString))).
+
+%% date string has timezone information, calculate the offset.
+date_to_unix_ts(TimeUnit, FormatString, InputString) ->
+    Unit = time_unit(TimeUnit),
+    emqx_calendar:parse(InputString, Unit, FormatString).
+
+%% date string has no timezone information, force add the offset.
+date_to_unix_ts(TimeUnit, Offset, FormatString, InputString) ->
+    Unit = time_unit(TimeUnit),
+    OffsetSecond = emqx_calendar:offset_second(Offset),
+    OffsetDelta = erlang:convert_time_unit(OffsetSecond, second, Unit),
+    date_to_unix_ts(Unit, FormatString, InputString) - OffsetDelta.
+
+mongo_date() ->
+    erlang:timestamp().
+
+mongo_date(MillisecondsTimestamp) ->
+    convert_timestamp(MillisecondsTimestamp).
+
+mongo_date(Timestamp, Unit) ->
+    InsertedTimeUnit = time_unit(Unit),
+    ScaledEpoch = erlang:convert_time_unit(Timestamp, InsertedTimeUnit, millisecond),
+    convert_timestamp(ScaledEpoch).
+
+convert_timestamp(MillisecondsTimestamp) ->
+    MicroTimestamp = MillisecondsTimestamp * 1000,
+    MegaSecs = MicroTimestamp div 1000_000_000_000,
+    Secs = MicroTimestamp div 1000_000 - MegaSecs*1000_000,
+    MicroSecs = MicroTimestamp rem 1000_000,
+    {MegaSecs, Secs, MicroSecs}.
 
 %% @doc This is for sql funcs that should be handled in the specific modules.
 %% Here the emqx_rule_funcs module acts as a proxy, forwarding
 %% the function handling to the worker module.
 %% @end
 -ifdef(EMQX_ENTERPRISE).
-'$handle_undefined_function'(schema_decode, [SchemaId, Data|MoreArgs]) ->
+'$handle_undefined_function'(schema_decode, [SchemaId, Data | MoreArgs]) ->
     emqx_schema_parser:decode(SchemaId, Data, MoreArgs);
 '$handle_undefined_function'(schema_decode, Args) ->
     error({args_count_error, {schema_decode, Args}});
 
-'$handle_undefined_function'(schema_encode, [SchemaId, Term|MoreArgs]) ->
+'$handle_undefined_function'(schema_encode, [SchemaId, Term | MoreArgs]) ->
     emqx_schema_parser:encode(SchemaId, Term, MoreArgs);
 '$handle_undefined_function'(schema_encode, Args) ->
     error({args_count_error, {schema_encode, Args}});
 
-'$handle_undefined_function'(sprintf, [Format|Args]) ->
+'$handle_undefined_function'(sprintf, [Format | Args]) ->
     erlang:apply(fun sprintf_s/2, [Format, Args]);
 
 '$handle_undefined_function'(Fun, Args) ->
     error({sql_function_not_supported, function_literal(Fun, Args)}).
 -else.
-'$handle_undefined_function'(sprintf, [Format|Args]) ->
+'$handle_undefined_function'(sprintf, [Format | Args]) ->
     erlang:apply(fun sprintf_s/2, [Format, Args]);
 
 '$handle_undefined_function'(Fun, Args) ->

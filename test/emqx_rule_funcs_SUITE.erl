@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -125,6 +125,13 @@ t_float(_) ->
     ?assertError({invalid_number, {a, v}}, emqx_rule_funcs:float({a, v})),
     ?assertError(_, emqx_rule_funcs:float("a")).
 
+
+t_float2str(_) ->
+    ?assertEqual(<<"20.2">>, emqx_rule_funcs:float2str(20.2, 1)),
+    ?assertEqual(<<"20.2">>, emqx_rule_funcs:float2str(20.2, 10)),
+    ?assertEqual(<<"20.199999999999999">>, emqx_rule_funcs:float2str(20.2, 15)),
+    ?assertEqual(<<"20.1999999999999993">>, emqx_rule_funcs:float2str(20.2, 16)).
+
 t_map(_) ->
     ?assertEqual(#{ver => <<"1.0">>, name => "emqx"}, emqx_rule_funcs:map([{ver, <<"1.0">>}, {name, "emqx"}])),
     ?assertEqual(#{<<"a">> => 1}, emqx_rule_funcs:map(<<"{\"a\":1}">>)),
@@ -159,8 +166,12 @@ t_term_encode(_) ->
         end, TestData).
 
 t_hexstr2bin(_) ->
-    ?assertEqual(<<1,2>>, emqx_rule_funcs:hexstr2bin(<<"0102">>)),
-    ?assertEqual(<<17,33>>, emqx_rule_funcs:hexstr2bin(<<"1121">>)).
+    ?assertEqual(<<6, 54, 79>>, emqx_rule_funcs:hexstr2bin(<<"6364f">>)),
+    ?assertEqual(<<10>>, emqx_rule_funcs:hexstr2bin(<<"a">>)),
+    ?assertEqual(<<15>>, emqx_rule_funcs:hexstr2bin(<<"f">>)),
+    ?assertEqual(<<5>>, emqx_rule_funcs:hexstr2bin(<<"5">>)),
+    ?assertEqual(<<1, 2>>, emqx_rule_funcs:hexstr2bin(<<"0102">>)),
+    ?assertEqual(<<17, 33>>, emqx_rule_funcs:hexstr2bin(<<"1121">>)).
 
 t_bin2hexstr(_) ->
     ?assertEqual(<<"0102">>, emqx_rule_funcs:bin2hexstr(<<1,2>>)),
@@ -609,6 +620,40 @@ prop_hash_fun() ->
                 (64 == byte_size(apply_func(sha256, [S])))
             end).
 
+
+%%------------------------------------------------------------------------------
+%% Test cases for gzip funcs
+%%------------------------------------------------------------------------------
+
+t_gzip_funcs(_) ->
+    ?PROPTEST(prop_gzip_fun).
+
+prop_gzip_fun() ->
+    ?FORALL(S, binary(),
+            S == apply_func(gunzip, [apply_func(gzip, [S])])).
+
+%%------------------------------------------------------------------------------
+%% Test cases for zip funcs
+%%------------------------------------------------------------------------------
+
+t_zip_funcs(_) ->
+    ?PROPTEST(prop_zip_fun).
+
+prop_zip_fun() ->
+    ?FORALL(S, binary(),
+            S == apply_func(unzip, [apply_func(zip, [S])])).
+
+%%------------------------------------------------------------------------------
+%% Test cases for zip funcs
+%%------------------------------------------------------------------------------
+
+t_zip_compress_funcs(_) ->
+    ?PROPTEST(prop_zip_compress_fun).
+
+prop_zip_compress_fun() ->
+    ?FORALL(S, binary(),
+            S == apply_func(zip_uncompress, [apply_func(zip_compress, [S])])).
+
 %%------------------------------------------------------------------------------
 %% Test cases for base64
 %%------------------------------------------------------------------------------
@@ -664,9 +709,33 @@ t_rfc3339_to_unix_ts(_) ->
         ?assertEqual(Epoch, emqx_rule_funcs:rfc3339_to_unix_ts(DateTime, BUnit))
      end || Unit <- [second,millisecond,microsecond,nanosecond]].
 
-%%------------------------------------------------------------------------------
-%% Utility functions
-%%------------------------------------------------------------------------------
+t_format_date_funcs(_) ->
+    ?PROPTEST(prop_format_date_fun).
+
+prop_format_date_fun() ->
+    Args1 = [<<"second">>, <<"+07:00">>, <<"%m--%d--%Y---%H:%M:%S%z">>],
+    ?FORALL(S, erlang:system_time(second),
+            S == apply_func(date_to_unix_ts,
+                            Args1 ++ [apply_func(format_date,
+                                                 Args1 ++ [S])])),
+    Args2 = [<<"millisecond">>, <<"+04:00">>, <<"--%m--%d--%Y---%H:%M:%S:%3N%z">>],
+    Args2DTUS = [<<"millisecond">>, <<"--%m--%d--%Y---%H:%M:%S:%3N%z">>],
+    ?FORALL(S, erlang:system_time(millisecond),
+            S == apply_func(date_to_unix_ts,
+                            Args2DTUS ++ [apply_func(format_date,
+                                                 Args2 ++ [S])])),
+    Args = [<<"second">>, <<"+08:00">>, <<"%Y-%m-%d-%H:%M:%S%z">>],
+    ArgsDTUS = [<<"second">>, <<"%Y-%m-%d-%H:%M:%S%z">>],
+    ?FORALL(S, erlang:system_time(second),
+            S == apply_func(date_to_unix_ts,
+                            ArgsDTUS ++ [apply_func(format_date,
+                                                Args ++ [S])])),
+    % no offset in format string. force add offset
+    Second = erlang:system_time(second),
+    Args3 = [<<"second">>, <<"+04:00">>, <<"--%m--%d--%Y---%H:%M:%S">>, Second],
+    Formatters3 = apply_func(format_date, Args3),
+    Args3DTUS = [<<"second">>, <<"+04:00">>, <<"--%m--%d--%Y---%H:%M:%S">>, Formatters3],
+    Second == apply_func(date_to_unix_ts, Args3DTUS).
 
 apply_func(Name, Args) when is_atom(Name) ->
     erlang:apply(emqx_rule_funcs, Name, Args);
@@ -822,4 +891,3 @@ all() ->
 
 suite() ->
     [{ct_hooks, [cth_surefire]}, {timetrap, {seconds, 30}}].
-
